@@ -250,7 +250,7 @@ class CoSimClient(object):
                   if self.carla_entered[vid] == False:
                         self.carla_entered[vid] = True
             else:
-                  # case 1: vehicle has not entered the co-sim area yet
+                  # case 1: vehicle has not entered the co-sim area yet 
                   if self.carla_entered[vid] == False:
                         coord_map = self.carla_coordMaps[vid]
                         if len(coord_map) > 0:

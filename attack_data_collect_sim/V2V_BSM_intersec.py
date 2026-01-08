@@ -64,7 +64,7 @@ def kill_process_on_port(port=8000):
         print(f"Error killing process on port {port}:", e)
 
 if __name__ == '__main__':
-    force_restart = False
+    force_restart = True
     if force_restart:
         stop_previous_metsr_containers()
         #kill_process_on_port(8000)
