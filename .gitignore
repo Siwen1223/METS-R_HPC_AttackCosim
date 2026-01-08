@@ -1,8 +1,33 @@
+# Python cache & artifacts
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environments
+.venv/
+env/
+
+# Simulation & experiment outputs
 simulation_*/
-*.pyc
-*.pyc
-output/*
+output/
+_out/
+_out/*
+out_*/
+runs/
+expResult/
+
+# Logs
 *.log
-/data/IN
-/data/UA
-/data/Birmingham
+
+# Models / serialized data
+*.pth
+*.pt
+*.ckpt
+*.pkl
+
+# Datasets (large files)
+/data/
+
+# IDE & OS
+.vscode/
+.DS_Store

@@ -5,6 +5,10 @@ import numpy as np
 import carla
 from utils.carla_util import snap_to_ground
 from clients.METSRClient import METSRClient
+import os
+from PIL import Image
+from queue import Queue
+from queue import Empty
 
 """
 Implementation of the CoSim Client
@@ -46,6 +50,10 @@ class CoSimClient(object):
             self.carla_waiting_vehs = [] # vehicles waiting to enter the other road, should be visited in every 10 ticks
             self.waypoints = self.carla.get_map().generate_waypoints(2.0) # generate all waypoints at 2-meter intervals
 
+            self.carla_veh_sensors = {} # id of vehicle agents : sensor : sensor instances in CARLA belonging to this vehicle
+            self.carla_veh_dataCollect = set() # id of vehicle agents whose sensor data will be collected
+            self.carla_veh_sensor_queues = {} # id of vehicle agents : sensor : FIFO queue for storing sensor data
+
       def set_overlook_camera(self, world): # set the camera to overlook the whole map
             spectator = world.get_spectator()
             transform = carla.Transform()
@@ -70,7 +78,7 @@ class CoSimClient(object):
             # given x, y, find the corresponding z values and rotation in CARLA
             x, y = metsr_x, -metsr_y
             location = carla.Location(x, y, 0)
-            location = snap_to_ground(self.carla, location)
+            location = snap_to_ground(self.carla, location, 0.05)
             return location
       
       def get_carla_rotation(self, veh_inform):
@@ -93,6 +101,7 @@ class CoSimClient(object):
       def is_in_carla_submap(self, x, y):
             # project x, y to the nearest road in CARLA and check if the road ID is in the co-sim road
             road_id = self.carla.get_map().get_waypoint(carla.Location(x, y), project_to_road=True, lane_type=(carla.LaneType.Driving)).road_id
+            return True
             return road_id in self.config.carla_road
             
       def step(self):
@@ -185,9 +194,14 @@ class CoSimClient(object):
                   tmp_veh.set_target_velocity(carla.Vector3D(x=tmp_speed_x, y=tmp_speed_y, z=0))
 
                   if display_only:
+                        tmp_veh.set_simulate_physics(False) # Fix the bug of roll axis shaking
+                        tmp_veh.set_autopilot(False)
                         self.other_vehs[vid] = tmp_veh
                   else:
                         self.carla_vehs[vid] = tmp_veh
+
+                  if vid in self.carla_veh_dataCollect:
+                        self.deploy_vehicle_sensors(vid)
 
       def destroy_carla_vehicle(self, vid):
             if vid in self.carla_vehs:
@@ -209,6 +223,7 @@ class CoSimClient(object):
                   except:
                         pass
                   self.other_vehs.pop(vid, None)
+            self.destroy_vehicle_sensors(vid)
 
       def update_display_only_vehicle(self, vid, veh_inform):
             carla_veh = self.other_vehs.get(vid)
@@ -254,9 +269,12 @@ class CoSimClient(object):
                                     tmp_yaw = np.degrees(np.arctan2(dy, dx))
                                     tmp_rotation = carla.Rotation(pitch=0, yaw=tmp_yaw, roll=0)
                                     # Set transform and velocity
+                                    #carla_veh.set_autopilot(False)
+                                    #carla_veh.set_simulate_physics(False)
                                     carla_veh.set_transform(
                                           carla.Transform(self.get_carla_location(target[0], target[1]), tmp_rotation)
                                     )
+                                    print(target[0], target[1],tmp_yaw)
                                     tmp_speed = max(veh_inform['speed'], 0.1) # set a minimum speed to avoid stopping
                                     tmp_speed_x = tmp_speed * np.cos(tmp_yaw * np.pi / 180)
                                     tmp_speed_y = tmp_speed * np.sin(tmp_yaw * np.pi / 180)
@@ -295,3 +313,133 @@ class CoSimClient(object):
 
       def generate_random_trips(self, num_trips, start_vid = 0):
             self.metsr.generate_trip(list(range(start_vid, start_vid+num_trips))) 
+
+      def enable_vehicle_sensor(self, vid):
+            self.carla_veh_dataCollect.add(vid)
+
+      def disable_vehicle_sensor(self, vid):
+            self.carla_veh_dataCollect.discard(vid)
+
+      def deploy_vehicle_sensors(self, vid):
+            if vid in self.carla_veh_sensors:
+                  return  # already deployed
+            bp_lib = self.carla.get_blueprint_library()
+            image_width = 680
+            image_height = 420
+            camera_bp = bp_lib.filter("sensor.camera.rgb")[0]
+            lidar_bp = bp_lib.filter("sensor.lidar.ray_cast")[0]
+            # Configure the blueprints
+            camera_bp.set_attribute("image_size_x", str(image_width))
+            camera_bp.set_attribute("image_size_y", str(image_height))
+
+            lidar_bp.set_attribute('dropoff_general_rate', '0.0')
+            lidar_bp.set_attribute('dropoff_intensity_limit', '1.0')
+            lidar_bp.set_attribute('dropoff_zero_intensity', '0.0')
+            lidar_bp.set_attribute('upper_fov', str(30))
+            lidar_bp.set_attribute('lower_fov', str(-25))
+            lidar_bp.set_attribute('channels', str(64.0))
+            lidar_bp.set_attribute('range', str(100))
+            lidar_bp.set_attribute('points_per_second', str(100000))
+
+            if vid in self.carla_vehs:
+                  vehicle = self.carla_vehs[vid]
+            elif vid in self.other_vehs:
+                  vehicle = self.other_vehs[vid]
+
+            self.carla_veh_sensors[vid] = {}
+            self.carla_veh_sensor_queues[vid] = {}
+            camera = self.carla.spawn_actor(
+                  blueprint=camera_bp,
+                  transform=carla.Transform(carla.Location(x=1.6, z=1.6)),
+                  attach_to=vehicle)
+            lidar = self.carla.spawn_actor(
+                  blueprint=lidar_bp,
+                  transform=carla.Transform(carla.Location(x=1.0, z=1.8)),
+                  attach_to=vehicle)
+            self.carla_veh_sensor_queues[vid]['camera'] = Queue()
+            self.carla_veh_sensor_queues[vid]['lidar'] = Queue()
+            camera.listen(lambda data: self.sensor_callback(data, self.carla_veh_sensor_queues[vid]['camera']))
+            lidar.listen(lambda data: self.sensor_callback(data, self.carla_veh_sensor_queues[vid]['lidar']))
+            
+            self.carla_veh_sensors[vid]['camera'] = camera
+            self.carla_veh_sensors[vid]['lidar'] = lidar
+
+      def sensor_callback(self, data, queue):
+            queue.put(data)
+      
+      def destroy_vehicle_sensors(self, vid):
+            if vid in self.carla_veh_sensors:
+            # Destroy the sensors in the scene.
+                  if self.carla_veh_sensors[vid]['camera']:
+                        self.carla_veh_sensors[vid]['camera'].destroy()
+                        while True:
+                              try:
+                                    self.carla_veh_sensor_queues[vid]['camera'].get_nowait()
+                              except Empty:
+                                    break
+                  if self.carla_veh_sensors[vid]['lidar']:
+                        self.carla_veh_sensors[vid]['lidar'].destroy()
+                        while True:
+                              try:
+                                    self.carla_veh_sensor_queues[vid]['lidar'].get_nowait()
+                              except Empty:
+                                    break
+                  self.carla_veh_sensors.pop(vid, None)
+
+      def collect_sensor_data(self, output_path=None):
+            for vid in self.carla_veh_dataCollect:
+                  self.save_sensor_data(vid, output_path)
+            
+      def save_sensor_data(self, vid, output_path=None):
+            if vid not in self.carla_vehs and vid not in self.other_vehs:
+                  return
+            elif vid not in self.carla_veh_sensors:
+                  print(f"[Warning] Vehicle {vid} has no deployed sensor.")
+                  return
+            #camera = self.carla_veh_sensors[vid]['camera']
+            #image_w = int(camera.attributes['image_size_x'])
+            #image_h = int(camera.attributes['image_size_y'])
+            #fov = float(camera.attributes['fov'])
+            #focal = image_w / (2.0 * np.tan(fov * np.pi / 360.0))
+
+            #image_data = self.carla_veh_sensor_queues[vid]['camera'].get(True, 1.0)
+            if output_path is None:
+                  output_path = "_out"
+            image_data = None
+            while True:
+                  try:
+                        image_data = self.carla_veh_sensor_queues[vid]['camera'].get_nowait()
+                  except Empty:
+                        break
+            if image_data is not None:
+                  # Get the raw BGRA buffer and convert it to an array of RGB of
+                  # shape (image_data.height, image_data.width, 3).
+                  im_array = np.copy(np.frombuffer(image_data.raw_data, dtype=np.dtype("uint8")))
+                  im_array = np.reshape(im_array, (image_data.height, image_data.width, 4))
+                  im_array = im_array[:, :, :3][:, :, ::-1]
+                  # Save the image using Pillow module.
+                  image = Image.fromarray(im_array)
+                  os.makedirs(os.path.join(output_path, str(vid), "camera"), exist_ok=True)
+                  image.save(os.path.join(output_path, str(vid), "camera", f"im{image_data.frame:08d}.png"))
+            else:
+                  print(f"[Warning] Some Camera data for vehicle {vid} has been missed")
+            #lidar_data = self.carla_veh_sensor_queues[vid]['lidar'].get(True, 1.0)
+            lidar_data = None
+            while True:
+                  try:
+                        lidar_data = self.carla_veh_sensor_queues[vid]['lidar'].get_nowait()
+                  except Empty:
+                        break
+            if lidar_data is not None:
+                  p_cloud_size = len(lidar_data)
+                  p_cloud = np.copy(np.frombuffer(lidar_data.raw_data, dtype=np.dtype('f4')))
+                  p_cloud = np.reshape(p_cloud, (p_cloud_size, 4))
+                  os.makedirs(os.path.join(output_path, str(vid), "lidar"), exist_ok=True)
+                  lidar_points = np.column_stack((p_cloud[:, 0], p_cloud[:, 1], p_cloud[:, 2], p_cloud[:, 3]))
+                  np.savez_compressed(os.path.join(output_path, str(vid), "lidar", f"lidar_{lidar_data.frame:08d}.npz"), lidar=lidar_points)
+            else:
+                print(f"[Warning] Some Lidar data for vehicle {vid} has been missed")
+                
+
+            
+

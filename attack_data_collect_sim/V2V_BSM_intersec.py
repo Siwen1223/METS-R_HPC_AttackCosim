@@ -1,0 +1,216 @@
+import sys
+from pathlib import Path
+ROOT_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT_DIR))
+
+import os
+import time
+import socket
+
+from utils.util import read_run_config, prepare_sim_dirs, run_simulation_in_docker
+from utils.carla_util import open_carla
+from clients.CoSimClient import CoSimClient
+from clients.KafkaDataProcessor import KafkaDataProcessor 
+from attack_data_collect_sim.v2v_controller_carla import V2VControllerCarla
+
+import subprocess
+import signal
+from carla import TrafficLightState
+
+
+def is_port_open(port, host="127.0.0.1", timeout=0.5):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(timeout)
+        return sock.connect_ex((host, port)) == 0
+
+
+def stop_previous_metsr_containers():
+    """Stop all running METS-R SIM containers."""
+    try:
+        result = subprocess.run(
+            ["docker", "ps", "-q", "--filter", "ancestor=ennuilei/mets-r_sim"],
+            capture_output=True,
+            text=True,
+        )
+        container_ids = result.stdout.strip().split('\n')
+        container_ids = [cid for cid in container_ids if cid]
+
+        if container_ids:
+            print(f"Stopping containers: {container_ids}")
+            subprocess.run(["docker", "stop"] + container_ids)
+        else:
+            print("No METS-R containers running.")
+    except Exception as e:
+        print("Error stopping METS-R containers:", e)
+
+def kill_process_on_port(port=8000):
+    """Kill the process that is using the given port."""
+    try:
+        result = subprocess.run(
+            ["lsof", "-i", f":{port}"],
+            capture_output=True,
+            text=True,
+        )
+        lines = result.stdout.strip().split('\n')
+        if len(lines) > 1:
+            for line in lines[1:]:
+                parts = line.split()
+                pid = int(parts[1])
+                print(f"Killing process {pid} using port {port}")
+                os.kill(pid, signal.SIGKILL)
+        else:
+            print(f"No process is using port {port}")
+    except Exception as e:
+        print(f"Error killing process on port {port}:", e)
+
+if __name__ == '__main__':
+    force_restart = False
+    if force_restart:
+        stop_previous_metsr_containers()
+        #kill_process_on_port(8000)
+        kill_process_on_port(2000)
+        kill_process_on_port(2001)
+    kill_process_on_port(8000)
+
+    # CARLA simulator configuration
+    config = read_run_config("configs/run_cosim_CARLAT5.json")
+    config.verbose = False
+
+     # Start docker
+    if not is_port_open(29092):
+        os.chdir("docker")
+        os.system("docker-compose up -d")
+        time.sleep(10) # wait 10s for the Kafka servers to be up
+        os.chdir("..")
+    else:
+        print("Kafka already running; reusing existing containers.")
+
+    to_add_config = {"metsr_road": ["-39", "39", "0", "-0", "-18", "40", "-41", "41"],
+                     "carla_road": [0, 18, 39, 40, 41, 350, 351, 797, 1464, 1489, 1575, 1697, 2280]}
+    for key, value in to_add_config.items():
+            setattr(config, key, value)
+        
+    # Kafka configuration
+    kafkaDataProcessor = KafkaDataProcessor(config)
+    kafkaDataProcessor.clear()
+
+    # CARLA visualization configuration
+    config.display_all = True  # Enable display of all vehicles
+    # Prepare simulation directories
+    dest_data_dirs = prepare_sim_dirs(config)
+    # Start CARLA server
+    carla_client, carla_tm = open_carla(config)
+    print("CARLA server started successfully")
+    # Launch METS-R simulation in Docker if not already running
+    metsr_port = config.metsr_port[0] if hasattr(config, "metsr_port") else 4000
+    metsr_reused = is_port_open(metsr_port)
+    if not metsr_reused:
+        container_ids = run_simulation_in_docker(config)
+    else:
+        print(f"METS-R already running on port {metsr_port}; reusing existing instance.")
+
+    ## Create CoSimClient (no co-simulation roads here)
+    cosim_client = CoSimClient(config, carla_client, carla_tm)
+    print("CoSimClient created successfully")
+    if metsr_reused and cosim_client.metsr.current_tick is None:
+        print("METS-R current_tick is None; resetting simulation for reuse.")
+        cosim_client.metsr.reset()
+        for road in getattr(config, "metsr_road", []):
+            cosim_client.metsr.set_cosim_road(road)
+    cosim_client.metsr.tick(10)
+
+    # Generate trips
+    cosim_client.metsr.generate_trip_between_roads([1], "-39", "-18")
+    cosim_client.metsr.update_vehicle_sensor_type([1], 1, True)
+
+    cosim_client.metsr.generate_trip_between_roads([2], "41", "0")
+    cosim_client.metsr.update_vehicle_sensor_type([2], 1, True)
+    cosim_client.set_custom_camera(-50, 0, 300)
+
+    vehicle_with_sensors = [1, 2]
+    vehicle_with_sensors = []
+    for vid in vehicle_with_sensors:
+         cosim_client.enable_vehicle_sensor(vid)
+    save_path = "out_0105"
+    #cosim_client.metsr.set_cosim_road(["-39", "39", "0", "-0", "-18", "40", "-41", "41"])
+
+    controller_vids = [1, 2]
+    controllers = {}
+    last_stream = []
+    dt = getattr(config, "sim_step_size", 0.1)
+
+    def init_controller_for_vid(vid):
+        if vid in controllers:
+            return
+        carla_vehicle = cosim_client.carla_vehs.get(vid)
+        if carla_vehicle is None:
+            return
+        carla_vehicle.set_autopilot(False)
+        controller = V2VControllerCarla(vehicle=carla_vehicle, ego_vid=vid, target_speed_mps=10.0)
+        coord_map = cosim_client.carla_coordMaps.get(vid)
+        if coord_map:
+            controller.set_route_from_metsr_coords(list(coord_map))
+        controllers[vid] = controller
+
+
+
+    # 采集数据、视频
+
+    try:
+        for i in range(6000):
+            for vid in controller_vids:
+                init_controller_for_vid(vid)
+
+            for vid, controller in controllers.items():
+                carla_vehicle = cosim_client.carla_vehs.get(vid)
+                if carla_vehicle is None:
+                    continue
+                control = controller.run_step(last_stream, dt=dt)
+                carla_vehicle.apply_control(control)
+
+            # Step simulation with CARLA visualization
+            cosim_client.step()
+
+            if i == 1:
+                '''# All green traffic lights (in Carla)
+                for traffic_light in cosim_client.carla.get_actors().filter('traffic.traffic_light'):
+                    traffic_light.set_state(TrafficLightState.Green)
+                    traffic_light.freeze(True)'''
+                
+                # All green traffic lights (in Metsrsim)
+                signal_ids = cosim_client.metsr.query_signal()['id_list']
+                for sid in signal_ids:
+                    cosim_client.metsr.update_signal_timing(sid, greenTime=300, yellowTime=0, redTime=0)
+
+                
+
+            if i % 5 == 0:
+                for vid in vehicle_with_sensors:
+                    cosim_client.collect_sensor_data(save_path)
+
+            data_stream = kafkaDataProcessor.process()
+            if data_stream is not None:
+                last_stream = data_stream
+            '''if i>=90 and i%5 == 0:
+                vehicle_states = cosim_client.metsr.query_vehicle([1], True)['DATA']
+                print('time', i)
+                print('veh1:', vehicle_states)
+                print('v2v:', data_stream)
+                input("Press Enter to continue...")'''
+            '''if i==115:
+                # generate position falsification attack bsm data
+                print('Attack data:', data_stream)
+                replay_data = []
+                replay_data.append(data_stream)
+                with open("position_falsi_replay.pkl", "wb") as f:
+                    pickle.dump(replay_data, f)'''
+            time.sleep(0.08)
+
+    except KeyboardInterrupt:
+        print("\nSimulation interrupted by user")
+
+    ## Terminate METS-R simulation
+    cosim_client.metsr.terminate()
+    os.chdir("docker")
+    os.system("docker-compose down")
+    os.chdir("..")
