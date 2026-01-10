@@ -25,6 +25,7 @@ class V2VControllerCarla:
         junction_yield_radius=12.0,
         lane_change_lookahead_s=4.0,
         enable_overtake_lane_change=False,
+        enable_debug_draw=False,
         v2v_position_mode="geodetic",
         v2v_lat_key="latitude",
         v2v_lon_key="longitude",
@@ -43,6 +44,7 @@ class V2VControllerCarla:
         self.junction_yield_radius = junction_yield_radius
         self.lane_change_lookahead_s = lane_change_lookahead_s
         self.enable_overtake_lane_change = enable_overtake_lane_change
+        self.enable_debug_draw = enable_debug_draw
         self.v2v_position_mode = v2v_position_mode
         self.v2v_lat_key = v2v_lat_key
         self.v2v_lon_key = v2v_lon_key
@@ -55,6 +57,7 @@ class V2VControllerCarla:
             "ignore_vehicles": True,
         }
         self.agent = BasicAgent(self.vehicle, target_speed=self._to_kmh(target_speed_mps), opt_dict=opt_dict, map_inst=self.map)
+        self._route_points = []
 
     def set_destination_xy(self, end_xy, start_xy=None, clean_queue=True):
         start_loc = None
@@ -63,17 +66,23 @@ class V2VControllerCarla:
         end_loc = self._metsr_to_carla_location(end_xy[0], end_xy[1])
         self.agent.set_destination(end_loc, start_location=start_loc, clean_queue=clean_queue)
 
-    def set_route_from_metsr_coords(self, coord_map, clean_queue=True):
+    def set_route_from_metsr_coords(self, coord_map, clean_queue=True, stop_waypoint_creation=True):
         if not coord_map:
             return
         plan = []
+        self._route_points = []
         for x, y in coord_map:
             loc = self._metsr_to_carla_location(x, y)
             wp = self.map.get_waypoint(loc, project_to_road=True, lane_type=carla.LaneType.Driving)
             if wp is not None:
                 plan.append((wp, RoadOption.LANEFOLLOW))
+                self._route_points.append(wp.transform.location)
         if plan:
-            self.agent.set_global_plan(plan, clean_queue=clean_queue)
+            self.agent.set_global_plan(
+                plan,
+                stop_waypoint_creation=stop_waypoint_creation,
+                clean_queue=clean_queue,
+            )
 
     def run_step(self, data_stream, dt=0.05):
         ego_speed = max(0.0, get_speed(self.vehicle) / 3.6)
@@ -100,7 +109,10 @@ class V2VControllerCarla:
         if self.enable_overtake_lane_change:
             self._maybe_request_lane_change(lead, ego_v2v, data_stream, dt)
         self.agent.set_target_speed(self._to_kmh(desired_speed))
-        return self.agent.run_step()
+        control = self.agent.run_step()
+        if self.enable_debug_draw:
+            self._draw_plan_points()
+        return control
 
     def get_metsr_state(self):
         loc = self.vehicle.get_location()
@@ -292,6 +304,19 @@ class V2VControllerCarla:
             if wp is not None:
                 waypoints.append(wp)
         return waypoints
+
+    def _draw_plan_points(self):
+        if not self._route_points:
+            return
+        color = carla.Color(255, 220, 0)
+        for loc in self._route_points:
+            self.world.debug.draw_point(
+                loc,
+                size=0.12,
+                color=color,
+                life_time=0.0,
+                persistent_lines=True,
+            )
 
     def _path_intersection(self, path_points, seg_start, seg_end):
         total = 0.0

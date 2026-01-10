@@ -34,6 +34,24 @@ def parse_args():
         help="Sample interval in meters along each edge polyline.",
     )
     parser.add_argument(
+        "--method",
+        choices=["projection", "coverage"],
+        default="coverage",
+        help="Mapping method: projection (nearest road) or coverage (road segments near SUMO polyline).",
+    )
+    parser.add_argument(
+        "--coverage-threshold",
+        type=float,
+        default=5.0,
+        help="Distance threshold in meters for coverage method.",
+    )
+    parser.add_argument(
+        "--carla-step",
+        type=float,
+        default=2.0,
+        help="Sampling step along CARLA topology segments for coverage method.",
+    )
+    parser.add_argument(
         "--transform",
         choices=["auto", "flip", "flip+add", "flip+sub"],
         default="auto",
@@ -169,9 +187,62 @@ def main():
     if missing_edges:
         print(f"WARNING: edges not found in SUMO net: {missing_edges}")
 
-    road_list = sorted(road_ids)
+    sumo_points = []
+    for road_id in metsr_roads:
+        edge = edges.get(road_id)
+        if edge is None:
+            continue
+        points = edge_shape_points(edge, nodes)
+        for x, y in sample_polyline(points, args.sample_step):
+            tx, ty = transform_point(x, y, best_mode)
+            sumo_points.append((tx, ty))
+
+    if args.method == "projection":
+        final_ids = road_ids
+        dist_info = (avg_dist, max_dist)
+    else:
+        threshold_sq = args.coverage_threshold ** 2
+
+        def sample_carla_segment_points(wp_start, wp_end, step):
+            pts = []
+            wp = wp_start
+            end_loc = wp_end.transform.location
+            for _ in range(2000):
+                loc = wp.transform.location
+                pts.append((loc.x, loc.y))
+                if loc.distance(end_loc) < step * 1.5:
+                    pts.append((end_loc.x, end_loc.y))
+                    break
+                nxt = wp.next(step)
+                if not nxt:
+                    break
+                wp = nxt[0]
+                if wp.road_id != wp_start.road_id or wp.lane_id != wp_start.lane_id:
+                    break
+            return pts
+
+        final_ids = set()
+        dist_samples = []
+        for wp_start, wp_end in carla_map.get_topology():
+            pts = sample_carla_segment_points(wp_start, wp_end, args.carla_step)
+            keep = False
+            for px, py in pts:
+                min_d2 = min((px - sx) ** 2 + (py - sy) ** 2 for sx, sy in sumo_points)
+                dist_samples.append(min_d2 ** 0.5)
+                if min_d2 <= threshold_sq:
+                    keep = True
+            if keep:
+                final_ids.add(wp_start.road_id)
+        avg_cov = sum(dist_samples) / max(1, len(dist_samples))
+        max_cov = max(dist_samples) if dist_samples else 0.0
+        dist_info = (avg_cov, max_cov)
+
+    road_list = sorted(final_ids)
     print(f"Selected transform: {best_mode}")
-    print(f"Average projection distance: {avg_dist:.2f} m (max {max_dist:.2f} m)")
+    if args.method == "projection":
+        print(f"Average projection distance: {dist_info[0]:.2f} m (max {dist_info[1]:.2f} m)")
+    else:
+        print(f"Average coverage distance: {dist_info[0]:.2f} m (max {dist_info[1]:.2f} m)")
     print("Derived carla_road list:")
     print(road_list)
     print("\nPython snippet:")

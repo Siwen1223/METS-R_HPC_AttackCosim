@@ -6,6 +6,7 @@ sys.path.insert(0, str(ROOT_DIR))
 import os
 import time
 import socket
+import xml.etree.ElementTree as ET
 
 from utils.util import read_run_config, prepare_sim_dirs, run_simulation_in_docker
 from utils.carla_util import open_carla
@@ -63,6 +64,78 @@ def kill_process_on_port(port=8000):
     except Exception as e:
         print(f"Error killing process on port {port}:", e)
 
+
+def load_sumo_net(net_path):
+    tree = ET.parse(net_path)
+    root = tree.getroot()
+    location = root.find("location")
+    net_offset = (0.0, 0.0)
+    if location is not None:
+        offset_str = location.get("netOffset", "0,0")
+        parts = offset_str.split(",")
+        if len(parts) >= 2:
+            net_offset = (float(parts[0]), float(parts[1]))
+    nodes = {}
+    for node in root.findall("node"):
+        node_id = node.get("id")
+        if node_id is None:
+            continue
+        nodes[node_id] = (float(node.get("x", "0")), float(node.get("y", "0")))
+    edges = {}
+    for edge in root.findall("edge"):
+        edge_id = edge.get("id")
+        if edge_id is None:
+            continue
+        edges[edge_id] = edge
+    return nodes, edges, net_offset
+
+
+def edge_shape_points(edge, nodes):
+    shape = edge.get("shape")
+    if shape:
+        points = []
+        for pair in shape.strip().split(" "):
+            parts = pair.split(",")
+            if len(parts) < 2:
+                continue
+            x_str, y_str = parts[0], parts[1]
+            points.append((float(x_str), float(y_str)))
+        return points
+    from_id = edge.get("from")
+    to_id = edge.get("to")
+    if from_id in nodes and to_id in nodes:
+        return [nodes[from_id], nodes[to_id]]
+    return []
+
+
+def sample_polyline(points, step):
+    if len(points) < 2:
+        return points
+    sampled = [points[0]]
+    for (x0, y0), (x1, y1) in zip(points[:-1], points[1:]):
+        dx = x1 - x0
+        dy = y1 - y0
+        seg_len = (dx * dx + dy * dy) ** 0.5
+        if seg_len == 0:
+            continue
+        num = max(1, int(seg_len // step))
+        for i in range(1, num + 1):
+            t = min(1.0, i * step / seg_len)
+            sampled.append((x0 + t * dx, y0 + t * dy))
+    return sampled
+
+
+def build_route_coords(route_ids, edges, nodes, net_offset, step=5.0):
+    coords = []
+    for road_id in route_ids:
+        edge = edges.get(str(road_id))
+        if edge is None:
+            continue
+        points = edge_shape_points(edge, nodes)
+        for x, y in sample_polyline(points, step):
+            coords.append((x - net_offset[0], y - net_offset[1]))
+    return coords
+
 if __name__ == '__main__':
     force_restart = True
     if force_restart:
@@ -86,7 +159,7 @@ if __name__ == '__main__':
         print("Kafka already running; reusing existing containers.")
 
     to_add_config = {"metsr_road": ["-39", "39", "0", "-0", "-18", "40", "-41", "41"],
-                     "carla_road": [0, 18, 39, 40, 41, 350, 351, 797, 1464, 1489, 1575, 1697, 2280]}
+                     "carla_road": [0, 18, 39, 40, 41, 243, 245, 249, 269, 281, 285, 293, 296, 306, 350, 351, 742, 746, 790, 791, 797, 824, 831, 1438, 1439, 1464, 1473, 1481, 1489, 1504, 1512, 1551, 1552, 1575, 1581, 1597, 1605, 1615, 1623, 1631, 1639, 1674, 1675, 1693, 1697, 1707, 1715, 2241, 2242, 2280, 2281]}
     for key, value in to_add_config.items():
             setattr(config, key, value)
         
@@ -122,10 +195,11 @@ if __name__ == '__main__':
     # Generate trips
     cosim_client.metsr.generate_trip_between_roads([1], "-39", "-18")
     cosim_client.metsr.update_vehicle_sensor_type([1], 1, True)
+    cosim_client.set_custom_camera(-50, 0, 100)
 
-    cosim_client.metsr.generate_trip_between_roads([2], "41", "0")
-    cosim_client.metsr.update_vehicle_sensor_type([2], 1, True)
-    cosim_client.set_custom_camera(-50, 0, 300)
+    '''cosim_client.metsr.generate_trip_between_roads([2], "41", "0")
+    cosim_client.metsr.update_vehicle_sensor_type([2], 1, True)'''
+
 
     vehicle_with_sensors = [1, 2]
     vehicle_with_sensors = []
@@ -134,10 +208,15 @@ if __name__ == '__main__':
     save_path = "out_0105"
     #cosim_client.metsr.set_cosim_road(["-39", "39", "0", "-0", "-18", "40", "-41", "41"])
 
-    controller_vids = [1, 2]
+    #controller_vids = [1, 2]
+    controller_vids = [1]
     controllers = {}
+    route_synced = {}
     last_stream = []
     dt = getattr(config, "sim_step_size", 0.1)
+    net_path = (ROOT_DIR / config.network_file).resolve()
+    net_nodes, net_edges, net_offset = load_sumo_net(net_path)
+    route_step = 5.0
 
     def init_controller_for_vid(vid):
         if vid in controllers:
@@ -146,11 +225,14 @@ if __name__ == '__main__':
         if carla_vehicle is None:
             return
         carla_vehicle.set_autopilot(False)
-        controller = V2VControllerCarla(vehicle=carla_vehicle, ego_vid=vid, target_speed_mps=10.0)
-        coord_map = cosim_client.carla_coordMaps.get(vid)
-        if coord_map:
-            controller.set_route_from_metsr_coords(list(coord_map))
+        controller = V2VControllerCarla(
+            vehicle=carla_vehicle,
+            ego_vid=vid,
+            target_speed_mps=10.0,
+            enable_debug_draw=True,
+        )
         controllers[vid] = controller
+        route_synced[vid] = False
 
 
 
@@ -162,8 +244,19 @@ if __name__ == '__main__':
                 init_controller_for_vid(vid)
 
             for vid, controller in controllers.items():
+                if not route_synced.get(vid, False) and cosim_client.carla_entered.get(vid, False):
+                    route_ids = cosim_client.carla_route.get(vid, [])
+                    if route_ids:
+                        coord_map = build_route_coords(route_ids, net_edges, net_nodes, net_offset, step=route_step)
+                        if coord_map:
+                            controller.set_route_from_metsr_coords(coord_map, stop_waypoint_creation=True)
+                            route_synced[vid] = True
+
+            for vid, controller in controllers.items():
                 carla_vehicle = cosim_client.carla_vehs.get(vid)
                 if carla_vehicle is None:
+                    continue
+                if not cosim_client.carla_entered.get(vid, False):
                     continue
                 control = controller.run_step(last_stream, dt=dt)
                 carla_vehicle.apply_control(control)
@@ -177,10 +270,10 @@ if __name__ == '__main__':
                     traffic_light.set_state(TrafficLightState.Green)
                     traffic_light.freeze(True)'''
                 
-                # All green traffic lights (in Metsrsim)
+                '''# All green traffic lights (in Metsrsim)
                 signal_ids = cosim_client.metsr.query_signal()['id_list']
                 for sid in signal_ids:
-                    cosim_client.metsr.update_signal_timing(sid, greenTime=300, yellowTime=0, redTime=0)
+                    cosim_client.metsr.update_signal_timing(sid, greenTime=300, yellowTime=0, redTime=0)'''
 
                 
 

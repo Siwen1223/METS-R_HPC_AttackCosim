@@ -101,7 +101,7 @@ class CoSimClient(object):
       def is_in_carla_submap(self, x, y):
             # project x, y to the nearest road in CARLA and check if the road ID is in the co-sim road
             road_id = self.carla.get_map().get_waypoint(carla.Location(x, y), project_to_road=True, lane_type=(carla.LaneType.Driving)).road_id
-            return True
+            #return True
             return road_id in self.config.carla_road
             
       def step(self):
@@ -249,6 +249,7 @@ class CoSimClient(object):
             if self.is_in_carla_submap(loc.x, loc.y):
                   if self.carla_entered[vid] == False:
                         self.carla_entered[vid] = True
+                  #print(f'目前：vehicle{vid}在cosim区域，位置为：{loc.x}, {loc.y}, {bearing}.')
             else:
                   # case 1: vehicle has not entered the co-sim area yet 
                   if self.carla_entered[vid] == False:
