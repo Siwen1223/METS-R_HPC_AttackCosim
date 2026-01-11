@@ -26,6 +26,10 @@ class V2VControllerCarla:
         min_gap=2.5,
         lane_half_width=2.0,
         conflict_horizon_s=4.0,
+        conflict_time_gap=1.0,
+        conflict_time_safe=3.0,
+        conflict_ignore_dist=2.0,
+        conflict_max_dist=40.0,
         junction_yield_radius=12.0,
         lane_change_lookahead_s=4.0,
         enable_overtake_lane_change=False,
@@ -45,6 +49,10 @@ class V2VControllerCarla:
         self.min_gap = min_gap
         self.lane_half_width = lane_half_width
         self.conflict_horizon_s = conflict_horizon_s
+        self.conflict_time_gap = conflict_time_gap
+        self.conflict_time_safe = conflict_time_safe
+        self.conflict_ignore_dist = conflict_ignore_dist
+        self.conflict_max_dist = conflict_max_dist
         self.junction_yield_radius = junction_yield_radius
         self.lane_change_lookahead_s = lane_change_lookahead_s
         self.enable_overtake_lane_change = enable_overtake_lane_change
@@ -124,8 +132,8 @@ class V2VControllerCarla:
             desired_speed = min(desired_speed, self._speed_for_gap(ego_speed, lead["distance"]))
 
         conflict = self._find_conflict_vehicle(ego_v2v, data_stream, path_points, ego_speed)
-        if conflict is not None and conflict["should_yield"]:
-            desired_speed = min(desired_speed, 0.0 if conflict["distance"] < 6.0 else ego_speed * 0.3)
+        if conflict is not None:
+            desired_speed = min(desired_speed, ego_speed * conflict["speed_factor"])
 
         if self._junction_blocked(ego_v2v, data_stream, path_points):
             desired_speed = 0.0
@@ -173,28 +181,61 @@ class V2VControllerCarla:
         return {"vehicle": best, "distance": best_dist}
 
     def _find_conflict_vehicle(self, ego_v2v, data_stream, path_points, ego_speed):
+        # Skip if no ego data or insufficient path geometry.
         if ego_v2v is None or len(path_points) < 2:
             return None
         best = None
-        best_time = float("inf")
+        best_gap = float("inf")
         for v in data_stream:
+            # Ignore self.
             if v.get("vid") == self.ego_vid:
                 continue
             other_loc = self._v2v_to_carla_location(ego_v2v, v)
+            # Skip vehicles without a valid position.
             if other_loc is None:
                 continue
             other_speed = max(0.1, v.get("velocity", 0.0))
             other_heading = v.get("heading", 0.0)
             other_end = self._project_forward(other_loc, other_heading, other_speed * self.conflict_horizon_s)
             hit = self._path_intersection(path_points, other_loc, other_end)
+            # Skip if their projected path does not intersect ours.
             if hit is None:
                 continue
-            ego_dist, other_dist = hit
+            ego_dist, other_dist, hit_loc = hit
+            # Ignore if the conflict point is effectively at the ego's current position. Avoid deadlock.
+            if ego_dist < self.conflict_ignore_dist:
+                continue
+            ego_heading = ego_v2v.get("heading", 0.0)
+            ego_loc = self.vehicle.get_location()
+            dx_e = hit_loc.x - ego_loc.x
+            dy_e = hit_loc.y - ego_loc.y
+            ego_long, _ = self._project_to_heading(ego_heading, dx_e, dy_e)
+            # Skip if the conflict point is behind the ego vehicle.
+            if ego_long <= 0.0:
+                continue
+            dx_o = hit_loc.x - other_loc.x
+            dy_o = hit_loc.y - other_loc.y
+            other_long, _ = self._project_to_heading(other_heading, dx_o, dy_o)
+            # Skip if the conflict point is behind the other vehicle.
+            if other_long <= 0.0:
+                continue
+            # Skip conflicts that are too far away from either vehicle.
+            if ego_dist > self.conflict_max_dist or other_dist > self.conflict_max_dist:
+                continue
             ego_time = ego_dist / max(0.1, ego_speed)
             other_time = other_dist / other_speed
-            if other_time + 0.5 < ego_time and other_time < best_time:
-                best_time = other_time
-                best = {"vehicle": v, "distance": ego_dist, "should_yield": True}
+            # Skip if the other vehicle is clearly earlier than the ego.
+            if other_time < ego_time - self.conflict_time_safe:
+                continue
+            # Skip if the other vehicle is clearly later than the ego.
+            if other_time > ego_time + self.conflict_time_safe:
+                continue
+            gap = abs(ego_time - other_time)
+            # Accept conflicts only inside the time-gap window and keep the closest gap.
+            if gap < self.conflict_time_gap and gap < best_gap:
+                best_gap = gap
+                speed_factor = 0.8 if ego_time < other_time else 0.3
+                best = {"vehicle": v, "distance": ego_dist, "speed_factor": speed_factor}
         return best
 
     def _junction_blocked(self, ego_v2v, data_stream, path_points):
@@ -350,7 +391,7 @@ class V2VControllerCarla:
             if hit is not None:
                 ego_dist = total + p0.distance(hit)
                 other_dist = seg_start.distance(hit)
-                return ego_dist, other_dist
+                return ego_dist, other_dist, hit
             total += seg_len
         return None
 

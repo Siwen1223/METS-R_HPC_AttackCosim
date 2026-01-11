@@ -5,6 +5,7 @@ sys.path.insert(0, str(ROOT_DIR))
 
 import os
 import time
+import socket
 import xml.etree.ElementTree as ET
 
 from utils.util import read_run_config, prepare_sim_dirs, run_simulation_in_docker
@@ -18,6 +19,12 @@ import subprocess
 import signal
 from carla import TrafficLightState
 import pickle
+
+
+def is_port_open(port, host="127.0.0.1", timeout=0.5):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(timeout)
+        return sock.connect_ex((host, port)) == 0
 
 
 def stop_previous_metsr_containers():
@@ -132,23 +139,29 @@ def build_route_coords(route_ids, edges, nodes, net_offset, step=5.0):
     return coords
 
 if __name__ == '__main__':
-    stop_previous_metsr_containers()
+    force_restart = True
+    if force_restart:
+        stop_previous_metsr_containers()
+        #kill_process_on_port(8000)
+        kill_process_on_port(2000)
+        kill_process_on_port(2001)
     kill_process_on_port(8000)
-    kill_process_on_port(2000)
-    kill_process_on_port(2001)
 
     # CARLA simulator configuration
     config = read_run_config("configs/run_cosim_CARLAT5.json")
     config.verbose = False
 
      # Start docker
-    os.chdir("docker")
-    os.system("docker-compose up -d")
-    time.sleep(10) # wait 10s for the Kafka servers to be up
-    os.chdir("..")
+    if not is_port_open(29092):
+        os.chdir("docker")
+        os.system("docker-compose up -d")
+        time.sleep(10) # wait 10s for the Kafka servers to be up
+        os.chdir("..")
+    else:
+        print("Kafka already running; reusing existing containers.")
 
     to_add_config = {"metsr_road": ["-39", "39", "0", "-0", "-18", "40", "-41", "41"],
-                     "carla_road": [0, 18, 39, 40, 41, 350, 351, 797, 1464, 1489, 1575, 1697, 2280]}
+                     "carla_road": [0, 18, 39, 40, 41, 243, 245, 249, 269, 281, 285, 293, 296, 306, 350, 351, 742, 746, 790, 791, 797, 824, 831, 1438, 1439, 1464, 1473, 1481, 1489, 1504, 1512, 1551, 1552, 1575, 1581, 1597, 1605, 1615, 1623, 1631, 1639, 1674, 1675, 1693, 1697, 1707, 1715, 2241, 2242, 2280, 2281]}
     for key, value in to_add_config.items():
             setattr(config, key, value)
         
@@ -164,21 +177,31 @@ if __name__ == '__main__':
     # Start CARLA server
     carla_client, carla_tm = open_carla(config)
     print("CARLA server started successfully")
-    # Launch METS-R simulation in Docker
-    container_ids = run_simulation_in_docker(config)
+    # Launch METS-R simulation in Docker if not already running
+    metsr_port = config.metsr_port[0] if hasattr(config, "metsr_port") else 4000
+    metsr_reused = is_port_open(metsr_port)
+    if not metsr_reused:
+        container_ids = run_simulation_in_docker(config)
+    else:
+        print(f"METS-R already running on port {metsr_port}; reusing existing instance.")
 
     ## Create CoSimClient (no co-simulation roads here)
     cosim_client = CoSimClient(config, carla_client, carla_tm)
     print("CoSimClient created successfully")
+    if metsr_reused and cosim_client.metsr.current_tick is None:
+        print("METS-R current_tick is None; resetting simulation for reuse.")
+        cosim_client.metsr.reset()
+        for road in getattr(config, "metsr_road", []):
+            cosim_client.metsr.set_cosim_road(road)
     cosim_client.metsr.tick(10)
 
     # Generate trips
     cosim_client.metsr.generate_trip_between_roads([1], "-39", "-18")
     cosim_client.metsr.update_vehicle_sensor_type([1], 1, True)
+    cosim_client.set_custom_camera(-50, 0, 100)
 
     cosim_client.metsr.generate_trip_between_roads([2], "41", "0")
     cosim_client.metsr.update_vehicle_sensor_type([2], 1, True)
-    cosim_client.set_custom_camera(-50, 0, 100)
 
     replay_data = [[{'qty_SV_in_view': 9, 'altitude': 0.0, 'SemiMinorAxisAccuracy': 2.0, 'elevation_confidence': 3.0, 'heading': 90.0, 'leap_seconds': 18, 'SemiMajorAxisAccuracy': 2.0, 'latitude': -0.0004018664573108967, 'qty_SV_used': 9, 'velocity': 0.0, 'GNSS_unavailable': False, 'vid': 0, 'SemiMajorAxisOrientation': 0.0, 'climb': 0.0, 'time_confidence': 0.0, 'utc_time': 126.0, 'GNSS_networkCorrectionsPresent': False, 'GNSS_localCorrectionsPresent': False, 'GNSS_aPDOPofUnder5': False, 'GNSS_inViewOfUnder5': False, 'utc_fix_mode': 3, 'longitude': -5.822375874899527e-05, 'velocity_confidence': 0.5}]]
     '''with open("position_falsi_replay.pkl", "rb") as f:
@@ -210,6 +233,7 @@ if __name__ == '__main__':
             ego_vid=vid,
             net_path=net_path,
             target_speed_mps=10.0,
+            enable_debug_draw=True,
         )
         controllers[vid] = controller
         route_synced[vid] = False
@@ -253,10 +277,10 @@ if __name__ == '__main__':
                     traffic_light.set_state(TrafficLightState.Green)
                     traffic_light.freeze(True)'''
                 
-                # All green traffic lights (in Metsrsim)
+                '''# All green traffic lights (in Metsrsim)
                 signal_ids = cosim_client.metsr.query_signal()['id_list']
                 for sid in signal_ids:
-                    cosim_client.metsr.update_signal_timing(sid, greenTime=300, yellowTime=0, redTime=0)
+                    cosim_client.metsr.update_signal_timing(sid, greenTime=300, yellowTime=0, redTime=0)'''
 
                 
 

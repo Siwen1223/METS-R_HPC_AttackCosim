@@ -214,7 +214,9 @@ if __name__ == '__main__':
                 # All green traffic lights (in Metsrsim)
                 signal_ids = cosim_client.metsr.query_signal()['id_list']
                 for sid in signal_ids:
-                    cosim_client.metsr.update_signal_timing(sid, greenTime=300, yellowTime=0, redTime=0)
+                    cosim_client.metsr.set_signal_phase_plan_ticks(sid, greenTicks=4000, yellowTicks=1, 
+                                                 redTicks=1, startPhase=0, tickOffset=0)
+
 
                 
 
