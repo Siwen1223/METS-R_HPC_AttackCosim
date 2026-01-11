@@ -195,10 +195,10 @@ if __name__ == '__main__':
     # Generate trips
     cosim_client.metsr.generate_trip_between_roads([1], "-39", "-18")
     cosim_client.metsr.update_vehicle_sensor_type([1], 1, True)
-    cosim_client.set_custom_camera(-50, 0, 100)
+    cosim_client.set_custom_camera(-50, 0, 200)
 
-    '''cosim_client.metsr.generate_trip_between_roads([2], "41", "0")
-    cosim_client.metsr.update_vehicle_sensor_type([2], 1, True)'''
+    cosim_client.metsr.generate_trip_between_roads([2], "41", "0")
+    cosim_client.metsr.update_vehicle_sensor_type([2], 1, True)
 
 
     vehicle_with_sensors = [1, 2]
@@ -208,15 +208,13 @@ if __name__ == '__main__':
     save_path = "out_0105"
     #cosim_client.metsr.set_cosim_road(["-39", "39", "0", "-0", "-18", "40", "-41", "41"])
 
-    #controller_vids = [1, 2]
-    controller_vids = [1]
+    controller_vids = [1, 2]
+    #controller_vids = [1]
     controllers = {}
     route_synced = {}
     last_stream = []
     dt = getattr(config, "sim_step_size", 0.1)
     net_path = (ROOT_DIR / config.network_file).resolve()
-    net_nodes, net_edges, net_offset = load_sumo_net(net_path)
-    route_step = 5.0
 
     def init_controller_for_vid(vid):
         if vid in controllers:
@@ -228,6 +226,7 @@ if __name__ == '__main__':
         controller = V2VControllerCarla(
             vehicle=carla_vehicle,
             ego_vid=vid,
+            net_path=net_path,
             target_speed_mps=10.0,
             enable_debug_draw=True,
         )
@@ -247,9 +246,7 @@ if __name__ == '__main__':
                 if not route_synced.get(vid, False) and cosim_client.carla_entered.get(vid, False):
                     route_ids = cosim_client.carla_route.get(vid, [])
                     if route_ids:
-                        coord_map = build_route_coords(route_ids, net_edges, net_nodes, net_offset, step=route_step)
-                        if coord_map:
-                            controller.set_route_from_metsr_coords(coord_map, stop_waypoint_creation=True)
+                        if controller.set_route_from_metsr_route(route_ids, stop_waypoint_creation=True):
                             route_synced[vid] = True
 
             for vid, controller in controllers.items():

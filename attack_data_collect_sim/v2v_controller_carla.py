@@ -5,6 +5,8 @@ from agents.navigation.basic_agent import BasicAgent
 from agents.navigation.local_planner import RoadOption
 from agents.tools.misc import get_speed
 
+from attack_data_collect_sim.cosim_pathplanner import CosimPathPlanner
+
 
 class V2VControllerCarla:
     """
@@ -17,6 +19,8 @@ class V2VControllerCarla:
         vehicle,
         ego_vid,
         map_inst=None,
+        net_path=None,
+        path_planner=None,
         target_speed_mps=10.0,
         time_headway=1.2,
         min_gap=2.5,
@@ -51,6 +55,9 @@ class V2VControllerCarla:
         self.v2v_x_key = v2v_x_key
         self.v2v_y_key = v2v_y_key
         self._lane_change_cooldown = 0.0
+        self.path_planner = path_planner
+        if self.path_planner is None and net_path is not None:
+            self.path_planner = CosimPathPlanner(self.world, net_path)
 
         opt_dict = {
             "ignore_traffic_lights": True,
@@ -66,13 +73,14 @@ class V2VControllerCarla:
         end_loc = self._metsr_to_carla_location(end_xy[0], end_xy[1])
         self.agent.set_destination(end_loc, start_location=start_loc, clean_queue=clean_queue)
 
-    def set_route_from_metsr_coords(self, coord_map, clean_queue=True, stop_waypoint_creation=True):
+    def set_route_from_carla_coords(self, coord_map, clean_queue=True, stop_waypoint_creation=True):
         if not coord_map:
             return
         plan = []
         self._route_points = []
-        for x, y in coord_map:
-            loc = self._metsr_to_carla_location(x, y)
+        for loc in coord_map:
+            if not isinstance(loc, carla.Location):
+                loc = carla.Location(x=loc[0], y=loc[1], z=loc[2] if len(loc) > 2 else 0.0)
             wp = self.map.get_waypoint(loc, project_to_road=True, lane_type=carla.LaneType.Driving)
             if wp is not None:
                 plan.append((wp, RoadOption.LANEFOLLOW))
@@ -83,6 +91,22 @@ class V2VControllerCarla:
                 stop_waypoint_creation=stop_waypoint_creation,
                 clean_queue=clean_queue,
             )
+
+    def set_route_from_metsr_route(self, route_ids, clean_queue=True, stop_waypoint_creation=True, draw_plan=False):
+        if not route_ids or self.path_planner is None:
+            return False
+        lane_points = self.path_planner.build_lane_points(route_ids)
+        if draw_plan:
+            self.path_planner.draw_coarse_points()
+            self.path_planner.draw_lane_points()
+        if not lane_points:
+            return False
+        self.set_route_from_carla_coords(
+            lane_points,
+            clean_queue=clean_queue,
+            stop_waypoint_creation=stop_waypoint_creation,
+        )
+        return True
 
     def run_step(self, data_stream, dt=0.05):
         ego_speed = max(0.0, get_speed(self.vehicle) / 3.6)

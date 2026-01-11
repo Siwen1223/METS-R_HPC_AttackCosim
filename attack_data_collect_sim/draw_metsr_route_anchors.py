@@ -26,7 +26,7 @@ def parse_args():
     parser.add_argument("--dest-road", default="-18")
     parser.add_argument(
         "--route",
-        default="-39,-0,-18",
+        default="41,40,0,25,-6,-47",
         help="Comma-separated METS-R road IDs (e.g., -39,-0,-18).",
     )
     parser.add_argument("--life-time", type=float, default=30.0)
@@ -87,6 +87,35 @@ def end_point(points):
     return points[-2], points[-1]
 
 
+def point_at_fraction(points, fraction):
+    if not points:
+        return None, None
+    if len(points) < 2:
+        return points[0], None
+    total = 0.0
+    seg_lengths = []
+    for a, b in zip(points[:-1], points[1:]):
+        dx = b[0] - a[0]
+        dy = b[1] - a[1]
+        length = (dx * dx + dy * dy) ** 0.5
+        seg_lengths.append(length)
+        total += length
+    if total == 0.0:
+        return points[0], points[1]
+    target = total * fraction
+    walked = 0.0
+    for idx, length in enumerate(seg_lengths):
+        if walked + length >= target:
+            a = points[idx]
+            b = points[idx + 1]
+            t = (target - walked) / length if length > 0.0 else 0.0
+            px = a[0] + (b[0] - a[0]) * t
+            py = a[1] + (b[1] - a[1]) * t
+            return (px, py), b
+        walked += length
+    return points[-2], points[-1]
+
+
 def offset_point(p0, p1, offset, direction='right'):
     if p0 is None or p1 is None or offset == 0.0:
         return p0
@@ -137,15 +166,16 @@ def main():
         if not points:
             missing.append(road_id)
             continue
-        p0, p1 = start_point(points)
-        if p0 is None:
-            missing.append(road_id)
-            continue
-        start_off = offset_point(p0, p1, args.half_road_width)
-        route_waypoints.append(sumo_to_metsr(start_off, net_offset))
+        for frac in (0.2, 0.5):
+            p0, p1 = point_at_fraction(points, frac)
+            if p0 is None or p1 is None:
+                missing.append(road_id)
+                continue
+            off = offset_point(p0, p1, args.half_road_width, direction="right")
+            route_waypoints.append(sumo_to_metsr(off, net_offset))
         if i == len(route_ids) - 1:
             pend0, pend1 = end_point(points)
-            end_off = offset_point(pend1, pend0, args.half_road_width, direction='left')
+            end_off = offset_point(pend1, pend0, args.half_road_width, direction="left")
             route_waypoints.append(sumo_to_metsr(end_off, net_offset))
 
     if missing:
@@ -170,6 +200,7 @@ def main():
     spectator.set_transform(transform)
 
     coarse_points = [metsr_to_carla(p) for p in route_waypoints]
+    lane_points = []
 
     for loc in coarse_points:
         world.debug.draw_point(
@@ -181,19 +212,29 @@ def main():
         )
 
     grp = GlobalRoutePlanner(world.get_map(), sampling_resolution=2.0)
-    lane_waypoints = []
-    for cur, nxt in zip(coarse_points[:-1], coarse_points[1:]):
+    segment_colors = [
+        carla.Color(255, 0, 0),
+        carla.Color(0, 255, 0),
+        carla.Color(0, 0, 255),
+        carla.Color(255, 255, 0),
+        carla.Color(255, 0, 255),
+        carla.Color(0, 255, 255),
+        carla.Color(255, 128, 0),
+        carla.Color(128, 0, 255),
+    ]
+    for idx, (cur, nxt) in enumerate(zip(coarse_points[:-1], coarse_points[1:])):
         segment = grp.trace_route(cur, nxt)
-        lane_waypoints.extend(segment)
-
-    '''for wp, _ in lane_waypoints:
-        world.debug.draw_point(
-            wp.transform.location,
-            size=0.12,
-            color=carla.Color(255, 255, 0),
-            life_time=0.0,
-            persistent_lines=True,
-        )'''
+        lane_points.extend(segment)
+        color = segment_colors[idx % len(segment_colors)]
+        for wp, _ in segment:
+            world.debug.draw_point(
+                wp.transform.location,
+                size=0.12,
+                color=color,
+                life_time=0.0,
+                persistent_lines=True,
+            )
+        input(f"Segment {idx + 1}/{len(coarse_points) - 1} drawn，{cur}, {nxt}. Press Enter for next...")
 
     world.debug.draw_point(coarse_points[0], size=0.45, color=carla.Color(0, 255, 0), life_time=0.0, persistent_lines=True)
     world.debug.draw_point(coarse_points[-1], size=0.45, color=carla.Color(255, 0, 0), life_time=0.0, persistent_lines=True)

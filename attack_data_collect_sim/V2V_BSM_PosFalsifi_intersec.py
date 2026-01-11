@@ -197,8 +197,6 @@ if __name__ == '__main__':
     last_stream = []
     dt = getattr(config, "sim_step_size", 0.1)
     net_path = (ROOT_DIR / config.network_file).resolve()
-    net_nodes, net_edges, net_offset = load_sumo_net(net_path)
-    route_step = 5.0
 
     def init_controller_for_vid(vid):
         if vid in controllers:
@@ -207,7 +205,12 @@ if __name__ == '__main__':
         if carla_vehicle is None:
             return
         carla_vehicle.set_autopilot(False)
-        controller = V2VControllerCarla(vehicle=carla_vehicle, ego_vid=vid, target_speed_mps=10.0)
+        controller = V2VControllerCarla(
+            vehicle=carla_vehicle,
+            ego_vid=vid,
+            net_path=net_path,
+            target_speed_mps=10.0,
+        )
         controllers[vid] = controller
         route_synced[vid] = False
 
@@ -224,9 +227,7 @@ if __name__ == '__main__':
                 if not route_synced.get(vid, False) and cosim_client.carla_entered.get(vid, False):
                     route_ids = cosim_client.carla_route.get(vid, [])
                     if route_ids:
-                        coord_map = build_route_coords(route_ids, net_edges, net_nodes, net_offset, step=route_step)
-                        if coord_map:
-                            controller.set_route_from_metsr_coords(coord_map, stop_waypoint_creation=True)
+                        if controller.set_route_from_metsr_route(route_ids, stop_waypoint_creation=True):
                             route_synced[vid] = True
 
             for vid, controller in controllers.items():
