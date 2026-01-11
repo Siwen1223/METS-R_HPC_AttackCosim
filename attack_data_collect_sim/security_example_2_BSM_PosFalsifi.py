@@ -152,10 +152,10 @@ if __name__ == '__main__':
     time.sleep(10) # wait 10s for the Kafka servers to be up
     os.chdir("..")
 
-    to_add_config = {"metsr_road": ["-39", "39", "0", "-0", "-18", "40", "-41", "41"],
+    '''to_add_config = {"metsr_road": ["-39", "39", "0", "-0", "-18", "40", "-41", "41"],
                      "carla_road": [39, 1631, 1639, 1674, 1623, 0, 1552, 1489, 1481, \
                                     17, 47, 46, 1211, 1174, 1140, 1182, 1222, 1290, 1141, 1291, 1236, 1193, 1231, 1201]}
-
+    '''
     # Kafka configuration
     kafkaDataProcessor = KafkaDataProcessor(config)
     kafkaDataSender = KafkaDataSender(config)
@@ -186,7 +186,7 @@ if __name__ == '__main__':
     cosim_client.metsr.update_vehicle_sensor_type([2], 1, True)
     cosim_client.set_custom_camera(-50, 0, 100)
 
-    replay_data = [[{'qty_SV_in_view': 9, 'altitude': 0.0, 'SemiMinorAxisAccuracy': 2.0, 'elevation_confidence': 3.0, 'heading': 90.0, 'leap_seconds': 18, 'SemiMajorAxisAccuracy': 2.0, 'latitude': -0.0004018664573108967, 'qty_SV_used': 9, 'velocity': 0.0, 'GNSS_unavailable': False, 'vid': 0, 'SemiMajorAxisOrientation': 0.0, 'climb': 0.0, 'time_confidence': 0.0, 'utc_time': 126.0, 'GNSS_networkCorrectionsPresent': False, 'GNSS_localCorrectionsPresent': False, 'GNSS_aPDOPofUnder5': False, 'GNSS_inViewOfUnder5': False, 'utc_fix_mode': 3, 'longitude': -5.822375874899527e-05, 'velocity_confidence': 0.5}]]
+    #replay_data = [[{'qty_SV_in_view': 9, 'altitude': 0.0, 'SemiMinorAxisAccuracy': 2.0, 'elevation_confidence': 3.0, 'heading': 90.0, 'leap_seconds': 18, 'SemiMajorAxisAccuracy': 2.0, 'latitude': -0.0004018664573108967, 'qty_SV_used': 9, 'velocity': 0.0, 'GNSS_unavailable': False, 'vid': 0, 'SemiMajorAxisOrientation': 0.0, 'climb': 0.0, 'time_confidence': 0.0, 'utc_time': 126.0, 'GNSS_networkCorrectionsPresent': False, 'GNSS_localCorrectionsPresent': False, 'GNSS_aPDOPofUnder5': False, 'GNSS_inViewOfUnder5': False, 'utc_fix_mode': 3, 'longitude': -5.822375874899527e-05, 'velocity_confidence': 0.5}]]
     '''with open("position_falsi_replay.pkl", "rb") as f:
         replay_data = pickle.load(f)'''
     
@@ -223,9 +223,9 @@ if __name__ == '__main__':
                     cosim_client.collect_sensor_data(save_path)
 
             # send attack
-            if i<= 265: 
+            '''if i<= 265: 
                 for data in replay_data[0]:
-                    kafkaDataSender.send("bsm", data)
+                    kafkaDataSender.send("bsm", data)'''
 
             data_stream = kafkaDataProcessor.process()
             if data_stream is not None:

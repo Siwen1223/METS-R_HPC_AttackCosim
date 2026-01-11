@@ -195,7 +195,7 @@ if __name__ == '__main__':
     # Generate trips
     cosim_client.metsr.generate_trip_between_roads([1], "-39", "-18")
     cosim_client.metsr.update_vehicle_sensor_type([1], 1, True)
-    cosim_client.set_custom_camera(-50, 0, 200)
+    cosim_client.set_custom_camera(-50, 0, 100)
 
     cosim_client.metsr.generate_trip_between_roads([2], "41", "0")
     cosim_client.metsr.update_vehicle_sensor_type([2], 1, True)
