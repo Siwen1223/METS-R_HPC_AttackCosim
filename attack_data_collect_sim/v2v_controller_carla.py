@@ -146,6 +146,9 @@ class V2VControllerCarla:
             self._draw_plan_points()
         return control
 
+    def is_route_complete(self):
+        return self.agent.done()
+
     def get_metsr_state(self):
         loc = self.vehicle.get_location()
         yaw = self.vehicle.get_transform().rotation.yaw

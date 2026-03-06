@@ -3,7 +3,7 @@ import cv2
 import matplotlib.pyplot as plt
 
 vid = 1                     # vehicle id to replay
-save_folder = "out_1221"
+save_folder = "out_0305"
 folder = save_folder+f"/{vid}/camera"
 start_frame = 1335
 end_frame = 1800

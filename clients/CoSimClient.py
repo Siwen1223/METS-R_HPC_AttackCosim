@@ -44,6 +44,7 @@ class CoSimClient(object):
             self.carla_route = {}
             self.carla_destRoad = {}
             self.carla_entered = {}
+            self.carla_private_flags = {}
 
             self.other_vehs = {} # id of agent and vehicle controlled by METSR, only used for display all vehicles
 
@@ -116,6 +117,7 @@ class CoSimClient(object):
             # Update co-sim vehicles in CARLA
 
             for cosim_id, cosim_veh, private_flag, veh_info in zip(cosim_ids, cosim_vehs, private_flags, all_data):
+                  self.carla_private_flags[cosim_id] = private_flag
                   if cosim_id in self.carla_vehs:
                         if cosim_id not in self.carla_waiting_vehs:
                               self.sync_carla_vehicle(cosim_id, private_flag, veh_info)
@@ -215,6 +217,7 @@ class CoSimClient(object):
                   self.carla_route.pop(vid, None)
                   self.carla_destRoad.pop(vid, None)
                   self.carla_entered.pop(vid, None)
+                  self.carla_private_flags.pop(vid, None)
                   if vid in self.carla_waiting_vehs:
                         self.carla_waiting_vehs.remove(vid)
             if vid in self.other_vehs:
@@ -249,7 +252,7 @@ class CoSimClient(object):
             if self.is_in_carla_submap(loc.x, loc.y):
                   if self.carla_entered[vid] == False:
                         self.carla_entered[vid] = True
-                  #print(f'目前：vehicle{vid}在cosim区域，位置为：{loc.x}, {loc.y}, {bearing}.')
+                  #print(f'vehicle{vid} in the cosim area，position：{loc.x}, {loc.y}, {bearing}.')
             else:
                   # case 1: vehicle has not entered the co-sim area yet 
                   if self.carla_entered[vid] == False:
@@ -443,4 +446,3 @@ class CoSimClient(object):
                 
 
             
-

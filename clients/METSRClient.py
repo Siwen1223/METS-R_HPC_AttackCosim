@@ -49,6 +49,7 @@ class METSRClient:
         failed_attempts = 0
         while True:
             try:
+                time.sleep(10)
                 self.ws = connect(self.uri, max_size = 10 * 1024 * 1024, ping_interval = None, ping_timeout = None)
                 self.state = "connected"
                 if self.verbose:
@@ -62,7 +63,7 @@ class METSRClient:
                 if failed_attempts >= max_connection_attempts:
                     self.state = "failed"
                     raise RuntimeError("Could not connect to METS-R SIM")
-                time.sleep(10)
+                
 
         print("Connection established!")
 
@@ -206,6 +207,25 @@ class METSRClient:
         res = self.send_receive_msg(my_msg, ignore_heartbeats=True)
         assert res["TYPE"] == "ANS_road", res["TYPE"]
         return res
+    
+    # query centerline
+    def query_centerline(self, id, lane_index = -1, transform_coords = False):
+        my_msg = {"TYPE": "QUERY_centerLine"}
+        if id is not None:
+            my_msg['DATA'] = []
+            if not isinstance(id, list):
+                id = [id]
+            if not isinstance(lane_index, list):
+                lane_index = [lane_index] * len(id)
+            if not isinstance(transform_coords, list):
+                transform_coords = [transform_coords] * len(id)
+            for i, lane_idx, tran in zip(id, lane_index, transform_coords):
+                my_msg['DATA'].append({"roadID": i, "laneIndex": lane_idx, "transformCoord": tran})
+        else:
+            raise ValueError("id cannot be None for query_centerLine")
+        res = self.send_receive_msg(my_msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "ANS_centerLine", res["TYPE"]
+        return res
 
     # query zone
     def query_zone(self, id = None):
@@ -231,6 +251,19 @@ class METSRClient:
                 my_msg['DATA'].append(i)
         res = self.send_receive_msg(my_msg, ignore_heartbeats=True)
         assert res["TYPE"] == "ANS_signal", res["TYPE"]
+        return res
+    
+    # query signal groups
+    def query_signal_group(self, id = None):
+        my_msg = {"TYPE": "QUERY_signalGroup"}
+        if id is not None:
+            my_msg['DATA'] = []
+            if not isinstance(id, list):
+                id = [id]
+            for i in id:
+                my_msg['DATA'].append(i)
+        res = self.send_receive_msg(my_msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "ANS_signalGroup", res["TYPE"]
         return res
     
     # query signal for connection between two consecutive roads
@@ -311,7 +344,7 @@ class METSRClient:
 
     # query road weights in the routing map
     def query_road_weights(self, roadID = None):
-        msg = {"TYPE": "QUERY_getEdgeWeight"}
+        msg = {"TYPE": "QUERY_edgeWeight"}
         if roadID is not None:
             msg["DATA"] = []
             if not isinstance(roadID, list):
@@ -319,12 +352,12 @@ class METSRClient:
             for i in roadID:
                 msg["DATA"].append(i)
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
-        assert res["TYPE"] == "ANS_getEdgeWeight", res["TYPE"]
+        assert res["TYPE"] == "ANS_edgeWeight", res["TYPE"]
         return res
     
     # query bus route
     def query_bus_route(self, routeID = None):
-        msg = {"TYPE": "QUERY_getBusRoute"}
+        msg = {"TYPE": "QUERY_busRoute"}
         if routeID is not None:
             msg["DATA"] = []
             if not isinstance(routeID, list):
@@ -332,12 +365,12 @@ class METSRClient:
             for i in routeID:
                 msg["DATA"].append(i)
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
-        assert res["TYPE"] == "ANS_getBusRoute", res["TYPE"]
+        assert res["TYPE"] == "ANS_busRoute", res["TYPE"]
         return res
     
     # find bus with route
     def query_route_bus(self, routeID = None):
-        msg = {"TYPE": "QUERY_getBusWithRoute"}
+        msg = {"TYPE": "QUERY_busWithRoute"}
         if routeID is not None:
             msg["DATA"] = []
             if not isinstance(routeID, list):
@@ -345,7 +378,7 @@ class METSRClient:
             for i in routeID:
                 msg["DATA"].append(i)
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
-        assert res["TYPE"] == "ANS_getBusWithRoute", res["TYPE"]
+        assert res["TYPE"] == "ANS_busWithRoute", res["TYPE"]
         return res
 
     # CONTROL: change the state of the simulator
@@ -408,7 +441,7 @@ class METSRClient:
     # release the road for co-simulation
     def release_cosim_road(self, roadID):
         msg = {
-                "TYPE": "CTRL_releaseCoSimRoad",
+                "TYPE": "CTRL_releaseCosimRoad",
                 "DATA": [] 
               }
         if not isinstance(roadID, list):
@@ -416,7 +449,7 @@ class METSRClient:
         for i in roadID:
             msg['DATA'].append(i)
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
-        assert res["TYPE"] == "CTRL_releaseCoSimRoad", res["TYPE"]
+        assert res["TYPE"] == "CTRL_releaseCosimRoad", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
         return res
         
@@ -465,25 +498,27 @@ class METSRClient:
         return res
     
     # enter the next road
-    def enter_next_road(self, vehID, private_veh = False):
+    def enter_next_road(self, vehID, roadID="", private_veh = False):
         msg = {
-                "TYPE": "CTRL_enterNextRoad",
+                "TYPE": "CTRL_enterNextRoad", 
                 "DATA": []
                 }
         if not isinstance(vehID, list):
             vehID = [vehID]
         if not isinstance(private_veh, list):
             private_veh = [private_veh] * len(vehID)
+        if not isinstance(roadID, list):
+            roadID = [roadID] * len(vehID)
         
-        for vehID, private_veh in zip(vehID, private_veh):
-            msg["DATA"].append({"vehID": vehID, "vehType": private_veh})
+        for vehID, private_veh, roadID in zip(vehID, private_veh, roadID):
+            msg["DATA"].append({"vehID": vehID, "vehType": private_veh, "roadID": roadID})
 
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] == "CTRL_enterNextRoad", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
         return res
-    
-    # exit cosim region
+
+    # exit cosim region (custom extension)
     def exit_cosim_region(self, vehID, x, y, private_veh = False, transform_coord = False):
         msg = {
                 "TYPE": "CTRL_exitCoSimRegion",
@@ -983,31 +1018,22 @@ class METSRClient:
 
             self.start_viz()
 
-    # Deprecated: reset the simulation with a property file
-    # # reset the simulation with a map name
-    # def reset_map(self, map_name):
-    #     # find the property file for the map
-    #     if map_name == "CARLA":
-    #         # copy CARLA data in the sim folder
-    #         # source_path = "data/CARLA"
-    #         # specify the property file
-    #         prop_file = "Data.properties.CARLA"
-    #     elif map_name == "NYC":
-    #         # copy NYC data in the sim folder
-    #         # source_path = "data/NYC"
-    #         # specify the property file
-    #         prop_file = "Data.properties.NYC"
-    #     elif map_name == "UA":
-    #         # copy UA data in the sim folder
-    #         # source_path = "data/UA"
-    #         # specify the property file
-    #         prop_file = "Data.properties.UA"
-
-    #     # docker_cp_command = f"docker cp {source_path} {self.docker_id}:/home/test/data/"
-    #     # subprocess.run(docker_cp_command, shell=True, check=True)
+    # save the simulation instance to zip
+    def save(self, filename):
+        msg = {"TYPE": "CTRL_save", "DATA": {"path": filename}}
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
         
-    #     # reset the simulation with the property file
-    #     self.reset(prop_file)
+        assert res["TYPE"] == "CTRL_save", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
+
+    # load the simulation instance to zip
+    def load(self, filename):
+        msg = {"TYPE": "CTRL_load", "DATA": {"path": filename}}
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_load", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
 
     # terminate the simulation
     def terminate(self):

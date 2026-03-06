@@ -6,17 +6,17 @@ sys.path.insert(0, str(ROOT_DIR))
 import os
 import time
 import socket
-import xml.etree.ElementTree as ET
 
 from utils.util import read_run_config, prepare_sim_dirs, run_simulation_in_docker
 from utils.carla_util import open_carla
 from clients.CoSimClient import CoSimClient
-from clients.KafkaDataProcessor import KafkaDataProcessor 
+from clients.KafkaDataProcessor import KafkaDataProcessor
+from clients.KafkaDataSender import KafkaDataSender
 from attack_data_collect_sim.v2v_controller_carla import V2VControllerCarla
+from attack_data_collect_sim.run_data_saver import RunDataSaver
 
 import subprocess
 import signal
-from carla import TrafficLightState
 
 
 def is_port_open(port, host="127.0.0.1", timeout=0.5):
@@ -44,6 +44,7 @@ def stop_previous_metsr_containers():
     except Exception as e:
         print("Error stopping METS-R containers:", e)
 
+
 def kill_process_on_port(port=8000):
     """Kill the process that is using the given port."""
     try:
@@ -65,77 +66,6 @@ def kill_process_on_port(port=8000):
         print(f"Error killing process on port {port}:", e)
 
 
-def load_sumo_net(net_path):
-    tree = ET.parse(net_path)
-    root = tree.getroot()
-    location = root.find("location")
-    net_offset = (0.0, 0.0)
-    if location is not None:
-        offset_str = location.get("netOffset", "0,0")
-        parts = offset_str.split(",")
-        if len(parts) >= 2:
-            net_offset = (float(parts[0]), float(parts[1]))
-    nodes = {}
-    for node in root.findall("node"):
-        node_id = node.get("id")
-        if node_id is None:
-            continue
-        nodes[node_id] = (float(node.get("x", "0")), float(node.get("y", "0")))
-    edges = {}
-    for edge in root.findall("edge"):
-        edge_id = edge.get("id")
-        if edge_id is None:
-            continue
-        edges[edge_id] = edge
-    return nodes, edges, net_offset
-
-
-def edge_shape_points(edge, nodes):
-    shape = edge.get("shape")
-    if shape:
-        points = []
-        for pair in shape.strip().split(" "):
-            parts = pair.split(",")
-            if len(parts) < 2:
-                continue
-            x_str, y_str = parts[0], parts[1]
-            points.append((float(x_str), float(y_str)))
-        return points
-    from_id = edge.get("from")
-    to_id = edge.get("to")
-    if from_id in nodes and to_id in nodes:
-        return [nodes[from_id], nodes[to_id]]
-    return []
-
-
-def sample_polyline(points, step):
-    if len(points) < 2:
-        return points
-    sampled = [points[0]]
-    for (x0, y0), (x1, y1) in zip(points[:-1], points[1:]):
-        dx = x1 - x0
-        dy = y1 - y0
-        seg_len = (dx * dx + dy * dy) ** 0.5
-        if seg_len == 0:
-            continue
-        num = max(1, int(seg_len // step))
-        for i in range(1, num + 1):
-            t = min(1.0, i * step / seg_len)
-            sampled.append((x0 + t * dx, y0 + t * dy))
-    return sampled
-
-
-def build_route_coords(route_ids, edges, nodes, net_offset, step=5.0):
-    coords = []
-    for road_id in route_ids:
-        edge = edges.get(str(road_id))
-        if edge is None:
-            continue
-        points = edge_shape_points(edge, nodes)
-        for x, y in sample_polyline(points, step):
-            coords.append((x - net_offset[0], y - net_offset[1]))
-    return coords
-
 if __name__ == '__main__':
     force_restart = True
     if force_restart:
@@ -149,7 +79,7 @@ if __name__ == '__main__':
     config = read_run_config("configs/run_cosim_CARLAT5.json")
     config.verbose = False
 
-     # Start docker
+    # Start docker
     if not is_port_open(29092):
         os.chdir("docker")
         os.system("docker-compose up -d")
@@ -162,15 +92,16 @@ if __name__ == '__main__':
                      "carla_road": [0, 18, 39, 40, 41, 243, 245, 249, 269, 281, 285, 293, 296, 306, 350, 351, 742, 746, 790, 791, 797, 824, 831, 1438, 1439, 1464, 1473, 1481, 1489, 1504, 1512, 1551, 1552, 1575, 1581, 1597, 1605, 1615, 1623, 1631, 1639, 1674, 1675, 1693, 1697, 1707, 1715, 2241, 2242, 2280, 2281]}
     for key, value in to_add_config.items():
             setattr(config, key, value)
-        
+
     # Kafka configuration
     kafkaDataProcessor = KafkaDataProcessor(config)
+    kafkaDataSender = KafkaDataSender(config)
     kafkaDataProcessor.clear()
 
     # CARLA visualization configuration
     config.display_all = True  # Enable display of all vehicles
     # Prepare simulation directories
-    dest_data_dirs = prepare_sim_dirs(config)
+    prepare_sim_dirs(config)
     # Start CARLA server
     carla_client, carla_tm = open_carla(config)
     print("CARLA server started successfully")
@@ -178,11 +109,11 @@ if __name__ == '__main__':
     metsr_port = config.metsr_port[0] if hasattr(config, "metsr_port") else 4000
     metsr_reused = is_port_open(metsr_port)
     if not metsr_reused:
-        container_ids = run_simulation_in_docker(config)
+        run_simulation_in_docker(config)
     else:
         print(f"METS-R already running on port {metsr_port}; reusing existing instance.")
 
-    ## Create CoSimClient (no co-simulation roads here)
+    # Create CoSimClient
     cosim_client = CoSimClient(config, carla_client, carla_tm)
     print("CoSimClient created successfully")
     if metsr_reused and cosim_client.metsr.current_tick is None:
@@ -200,21 +131,41 @@ if __name__ == '__main__':
     cosim_client.metsr.generate_trip_between_roads([2], "41", "0")
     cosim_client.metsr.update_vehicle_sensor_type([2], 1, True)
 
+    replay_data = [[{'qty_SV_in_view': 9, 'altitude': 0.0, 'SemiMinorAxisAccuracy': 2.0, 'elevation_confidence': 3.0, 'heading': 90.0, 'leap_seconds': 18, 'SemiMajorAxisAccuracy': 2.0, 'latitude': -0.0004018664573108967, 'qty_SV_used': 9, 'velocity': 0.0, 'GNSS_unavailable': False, 'vid': 0, 'SemiMajorAxisOrientation': 0.0, 'climb': 0.0, 'time_confidence': 0.0, 'utc_time': 126.0, 'GNSS_networkCorrectionsPresent': False, 'GNSS_localCorrectionsPresent': False, 'GNSS_aPDOPofUnder5': False, 'GNSS_inViewOfUnder5': False, 'utc_fix_mode': 3, 'longitude': -5.822375874899527e-05, 'velocity_confidence': 0.5}]]
 
     vehicle_with_sensors = [1, 2]
-    vehicle_with_sensors = []
     for vid in vehicle_with_sensors:
          cosim_client.enable_vehicle_sensor(vid)
-    save_path = "out_0105"
-    #cosim_client.metsr.set_cosim_road(["-39", "39", "0", "-0", "-18", "40", "-41", "41"])
 
     controller_vids = [1, 2]
-    #controller_vids = [1]
     controllers = {}
     route_synced = {}
     last_stream = []
     dt = getattr(config, "sim_step_size", 0.1)
     net_path = (ROOT_DIR / config.network_file).resolve()
+    max_steps = 400
+
+    dataset_root = ROOT_DIR / "V2X-Attack-Dataset"
+    attack_info = {
+        "attack_type": "BSM_pos_falsification",
+        "attack_target": "intersection",
+        "start_time": 0.0,
+        "end_time": 265 * dt,
+        "parameters": {
+            "fake_vehicle_id": 0,
+            "replay_delay_ms": 0,
+        },
+    }
+    meta_info = {
+        "map": getattr(config, "carla_map", None),
+        "random_seed": config.random_seeds[0] if getattr(config, "random_seeds", None) else None,
+        "sim_step_size": dt,
+        "sim_fps": 1.0 / dt if dt else None,
+        "max_steps": max_steps,
+        "planned_duration_sec": max_steps * dt,
+    }
+    data_saver = RunDataSaver(dataset_root, meta_info, attack_info, sensor_every_n=5)
+    data_saver.log_event(0.0, "Simulation started")
 
     def init_controller_for_vid(vid):
         if vid in controllers:
@@ -233,12 +184,12 @@ if __name__ == '__main__':
         controllers[vid] = controller
         route_synced[vid] = False
 
-
-
-    # 采集数据、视频
+    attack_started = False
+    attack_ended = False
 
     try:
-        for i in range(6000):
+        for i in range(max_steps):
+            sim_time = i * dt
             for vid in controller_vids:
                 init_controller_for_vid(vid)
 
@@ -257,6 +208,18 @@ if __name__ == '__main__':
                     continue
                 control = controller.run_step(last_stream, dt=dt)
                 carla_vehicle.apply_control(control)
+                data_saver.record_control(i, sim_time, vid, control)
+
+            # send attack
+            if i <= 265:
+                if not attack_started:
+                    data_saver.log_event(sim_time, "BSM pos-falsification attack started")
+                    attack_started = True
+                for data in replay_data[0]:
+                    kafkaDataSender.send("bsm", data)
+            elif not attack_ended:
+                data_saver.log_event(sim_time, "BSM pos-falsification attack ended")
+                attack_ended = True
 
             # Step simulation with CARLA visualization
             cosim_client.step()
@@ -285,46 +248,27 @@ if __name__ == '__main__':
             for vid in done_vids:
                 controllers.pop(vid, None)
                 route_synced.pop(vid, None)
+                data_saver.log_event(sim_time, f"Vehicle {vid} finished route")
 
-            if i == 1:
-                '''# All green traffic lights (in Carla)
-                for traffic_light in cosim_client.carla.get_actors().filter('traffic.traffic_light'):
-                    traffic_light.set_state(TrafficLightState.Green)
-                    traffic_light.freeze(True)'''
-                
-                '''# All green traffic lights (in Metsrsim)
-                signal_ids = cosim_client.metsr.query_signal()['id_list']
-                for sid in signal_ids:
-                    cosim_client.metsr.update_signal_timing(sid, greenTime=300, yellowTime=0, redTime=0)'''
+            if i % data_saver.sensor_every_n == 0:
+                data_saver.save_sensors(cosim_client)
 
-                
-
-            if i % 5 == 0:
-                for vid in vehicle_with_sensors:
-                    cosim_client.collect_sensor_data(save_path)
+            data_saver.record_vehicle_state(i, sim_time, cosim_client)
 
             data_stream = kafkaDataProcessor.process()
             if data_stream is not None:
                 last_stream = data_stream
-            '''if i>=90 and i%5 == 0:
-                vehicle_states = cosim_client.metsr.query_vehicle([1], True)['DATA']
-                print('time', i)
-                print('veh1:', vehicle_states)
-                print('v2v:', data_stream)
-                input("Press Enter to continue...")'''
-            '''if i==115:
-                # generate position falsification attack bsm data
-                print('Attack data:', data_stream)
-                replay_data = []
-                replay_data.append(data_stream)
-                with open("position_falsi_replay.pkl", "wb") as f:
-                    pickle.dump(replay_data, f)'''
+                data_saver.record_bsm(i, sim_time, data_stream)
+
             time.sleep(0.08)
 
     except KeyboardInterrupt:
         print("\nSimulation interrupted by user")
+    finally:
+        data_saver.log_event(sim_time, "Simulation ended")
+        data_saver.finalize(duration_sec=sim_time)
 
-    ## Terminate METS-R simulation
+    # Terminate METS-R simulation
     cosim_client.metsr.terminate()
     os.chdir("docker")
     os.system("docker-compose down")

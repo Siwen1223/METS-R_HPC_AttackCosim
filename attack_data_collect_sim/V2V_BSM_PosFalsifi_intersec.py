@@ -208,10 +208,10 @@ if __name__ == '__main__':
         replay_data = pickle.load(f)'''
     
     vehicle_with_sensors = [1, 2]
-    vehicle_with_sensors = []
+    #vehicle_with_sensors = []
     for vid in vehicle_with_sensors:
          cosim_client.enable_vehicle_sensor(vid)
-    save_path = "out_0105"
+    save_path = "out_0305"
     #cosim_client.metsr.set_cosim_road(["-39", "39", "0", "-0", "-18", "40", "-41", "41"])
 
     controller_vids = [1, 2]
@@ -240,7 +240,7 @@ if __name__ == '__main__':
 
 
 
-    # 采集数据、视频
+    # data collect
 
     try:
         for i in range(6000):
@@ -271,6 +271,31 @@ if __name__ == '__main__':
             # Step simulation with CARLA visualization
             cosim_client.step()
 
+            done_vids = []
+            for vid, controller in controllers.items():
+                if not cosim_client.carla_entered.get(vid, False):
+                    continue
+                if not controller.is_route_complete():
+                    continue
+                private_flag = cosim_client.carla_private_flags.get(vid, False)
+                dest_road = cosim_client.carla_destRoad.get(vid)
+                if dest_road in getattr(config, "metsr_road", []):
+                    res = cosim_client.metsr.reach_dest(vid, private_flag)
+                    if res["DATA"][0]["STATUS"] == "OK":
+                        cosim_client.destroy_carla_vehicle(vid)
+                        done_vids.append(vid)
+                else:
+                    carla_vehicle = cosim_client.carla_vehs.get(vid)
+                    if carla_vehicle is not None:
+                        loc = carla_vehicle.get_location()
+                        res = cosim_client.metsr.exit_cosim_region(vid, loc.x, -loc.y, private_flag, True)
+                        if res["DATA"][0]["STATUS"] == "OK":
+                            cosim_client.destroy_carla_vehicle(vid)
+                            done_vids.append(vid)
+            for vid in done_vids:
+                controllers.pop(vid, None)
+                route_synced.pop(vid, None)
+
             if i == 1:
                 '''# All green traffic lights (in Carla)
                 for traffic_light in cosim_client.carla.get_actors().filter('traffic.traffic_light'):
@@ -285,8 +310,7 @@ if __name__ == '__main__':
                 
 
             if i % 5 == 0:
-                for vid in vehicle_with_sensors:
-                    cosim_client.collect_sensor_data(save_path)
+                cosim_client.collect_sensor_data(save_path)
 
             data_stream = kafkaDataProcessor.process()
             if data_stream is not None:
