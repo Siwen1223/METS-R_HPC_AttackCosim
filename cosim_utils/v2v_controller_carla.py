@@ -1,17 +1,18 @@
 import math
 
 import carla
-from agents.navigation.basic_agent import BasicAgent
-from agents.navigation.local_planner import RoadOption
-from agents.tools.misc import get_speed
+from cosim_utils.agents.navigation.basic_agent import BasicAgent
+from cosim_utils.agents.navigation.local_planner import RoadOption
+from cosim_utils.agents.tools.misc import get_speed
 
-from attack_data_collect_sim.cosim_pathplanner import CosimPathPlanner
+from cosim_utils.cosim_pathplanner import CosimPathPlanner
 
 
 class V2VControllerCarla:
     """
-    CARLA-driven V2V controller. It plans in CARLA, applies VehicleControl,
-    and exposes CARLA state for syncing back to METS-R.
+    Control a CARLA vehicle with a CARLA-side route while incorporating nearby V2V information for car-following, lane changes, and conflict handling.
+    Inputs: A CARLA vehicle, route-planning resources, controller parameters, and V2V message settings.
+    Outputs: Produces CARLA control commands and exposes synchronized vehicle state for co-simulation.
     """
 
     def __init__(
@@ -40,6 +41,11 @@ class V2VControllerCarla:
         v2v_x_key="x",
         v2v_y_key="y",
     ):
+        """
+        Initialize the CARLA V2V controller, behavior agent, and optional co-sim path planner.
+        Inputs: Ego vehicle, ego ID, optional map/planner resources, control parameters, and V2V field settings.
+        Outputs: Sets up the controller state, behavior agent, and cached route containers.
+        """
         self.vehicle = vehicle
         self.ego_vid = ego_vid
         self.world = vehicle.get_world()
@@ -75,6 +81,11 @@ class V2VControllerCarla:
         self._route_points = []
 
     def set_destination_xy(self, end_xy, start_xy=None, clean_queue=True):
+        """
+        Set a CARLA destination for the agent from METS-R-style XY coordinates.
+        Inputs: Destination XY, optional start XY, and whether to clean the current waypoint queue.
+        Outputs: Updates the BasicAgent destination and route queue.
+        """
         start_loc = None
         if start_xy is not None:
             start_loc = self._metsr_to_carla_location(start_xy[0], start_xy[1])
@@ -82,6 +93,11 @@ class V2VControllerCarla:
         self.agent.set_destination(end_loc, start_location=start_loc, clean_queue=clean_queue)
 
     def set_route_from_carla_coords(self, coord_map, clean_queue=True, stop_waypoint_creation=True):
+        """
+        Convert a sequence of CARLA coordinates into a global waypoint plan for the agent.
+        Inputs: Route coordinates, queue reset option, and stop_waypoint_creation flag.
+        Outputs: Updates the agent global plan and cached route points.
+        """
         if not coord_map:
             return
         plan = []
@@ -101,6 +117,11 @@ class V2VControllerCarla:
             )
 
     def set_route_from_metsr_route(self, route_ids, clean_queue=True, stop_waypoint_creation=True, draw_plan=False):
+        """
+        Build a CARLA route from a METS-R road-id sequence and load it into the agent.
+        Inputs: METS-R route IDs, queue reset option, stop_waypoint_creation flag, and optional draw flag.
+        Outputs: Returns whether route loading succeeded and updates the agent plan.
+        """
         if not route_ids or self.path_planner is None:
             return False
         lane_points = self.path_planner.build_lane_points(route_ids)
@@ -117,6 +138,11 @@ class V2VControllerCarla:
         return True
 
     def run_step(self, data_stream, dt=0.05):
+        """
+        Compute one control step using V2V-aware following, conflict handling, and route tracking logic.
+        Inputs: Current V2V data stream and controller time step.
+        Outputs: Returns a CARLA VehicleControl command for the ego vehicle.
+        """
         ego_speed = max(0.0, get_speed(self.vehicle) / 3.6)
         desired_speed = self.target_speed_mps
 
@@ -147,21 +173,41 @@ class V2VControllerCarla:
         return control
 
     def is_route_complete(self):
+        """
+        Check whether the current agent route has been completed.
+        Inputs: No additional inputs.
+        Outputs: Returns True if the BasicAgent has finished its route, otherwise False.
+        """
         return self.agent.done()
 
     def get_metsr_state(self):
+        """
+        Export the ego vehicle state in the coordinate/bearing format expected by METS-R.
+        Inputs: No additional inputs.
+        Outputs: Returns x, y, and bearing derived from the current CARLA vehicle state.
+        """
         loc = self.vehicle.get_location()
         yaw = self.vehicle.get_transform().rotation.yaw
         bearing = (yaw + 90.0) % 360.0
         return loc.x, -loc.y, bearing
 
     def _get_ego_v2v(self, data_stream):
+        """
+        Find the ego vehicle record in the current V2V data stream.
+        Inputs: A list of V2V message dictionaries.
+        Outputs: Returns the ego V2V dictionary or None if it is missing.
+        """
         for v in data_stream:
             if v.get("vid") == self.ego_vid:
                 return v
         return None
 
     def _find_lead_vehicle(self, ego_v2v, data_stream):
+        """
+        Find the closest vehicle ahead of the ego within the current lane-width envelope.
+        Inputs: The ego V2V record and the full V2V data stream.
+        Outputs: Returns a lead-vehicle dictionary with distance information or None.
+        """
         if ego_v2v is None:
             return None
         ego_heading = ego_v2v.get("heading", 0.0)
@@ -184,6 +230,11 @@ class V2VControllerCarla:
         return {"vehicle": best, "distance": best_dist}
 
     def _find_conflict_vehicle(self, ego_v2v, data_stream, path_points, ego_speed):
+        """
+        Detect the most relevant crossing-conflict vehicle based on predicted intersection timing along the ego path.
+        Inputs: Ego V2V record, full V2V data stream, ego path points, and ego speed.
+        Outputs: Returns a conflict dictionary with speed_factor information or None.
+        """
         # Skip if no ego data or insufficient path geometry.
         if ego_v2v is None or len(path_points) < 2:
             return None
@@ -242,6 +293,11 @@ class V2VControllerCarla:
         return best
 
     def _junction_blocked(self, ego_v2v, data_stream, path_points):
+        """
+        Check whether another vehicle is occupying a relevant junction area ahead of the ego path.
+        Inputs: Ego V2V record, full V2V data stream, and ego path points.
+        Outputs: Returns True if the junction should be treated as blocked, otherwise False.
+        """
         if ego_v2v is None or not path_points:
             return False
         if not any(wp.is_junction for wp in self._path_waypoints(path_points)):
@@ -260,6 +316,11 @@ class V2VControllerCarla:
         return False
 
     def _maybe_request_lane_change(self, lead, ego_v2v, data_stream, dt):
+        """
+        Attempt an overtaking lane change when enabled and the current lead vehicle is too close.
+        Inputs: Lead-vehicle info, ego V2V record, full V2V data stream, and controller time step.
+        Outputs: May replace the current agent plan and update the lane-change cooldown.
+        """
         if self._lane_change_cooldown > 0.0:
             return
         if lead is None or lead["distance"] > 15.0:
@@ -280,6 +341,11 @@ class V2VControllerCarla:
                 break
 
     def _ensure_turn_lane(self, ego_speed, ego_v2v, data_stream, dt):
+        """
+        Move the ego into a required turn lane before an upcoming intersection maneuver.
+        Inputs: Ego speed, ego V2V record, full V2V data stream, and controller time step.
+        Outputs: May replace the current agent plan and update the lane-change cooldown.
+        """
         if self._lane_change_cooldown > 0.0:
             return
         planner = self.agent.get_local_planner()
@@ -312,12 +378,22 @@ class V2VControllerCarla:
             self._lane_change_cooldown = 3.0
 
     def _lane_change_allowed(self, waypoint, direction):
+        """
+        Check whether CARLA lane markings permit a lane change in the requested direction.
+        Inputs: Current lane waypoint and desired lane-change direction.
+        Outputs: Returns True if the lane change is allowed, otherwise False.
+        """
         allowed = waypoint.lane_change
         if direction == "left":
             return allowed in (carla.LaneChange.Left, carla.LaneChange.Both)
         return allowed in (carla.LaneChange.Right, carla.LaneChange.Both)
 
     def _plan_has_lane_change(self, road_option):
+        """
+        Check whether the current local plan already begins with the requested lane-change maneuver.
+        Inputs: Desired RoadOption for the lane change direction.
+        Outputs: Returns True if the current plan already contains that lane change, otherwise False.
+        """
         plan = list(self.agent.get_local_planner().get_plan())
         if not plan:
             return False
@@ -327,6 +403,11 @@ class V2VControllerCarla:
         return option == RoadOption.CHANGELANERIGHT
 
     def _lane_clear(self, target_lane, ego_v2v, data_stream):
+        """
+        Check whether the target lane is free of nearby vehicles around the merge point.
+        Inputs: Target lane waypoint, ego V2V record, and full V2V data stream.
+        Outputs: Returns True if the target lane is considered clear, otherwise False.
+        """
         if ego_v2v is None:
             return False
         for v in data_stream:
@@ -344,6 +425,11 @@ class V2VControllerCarla:
         return True
 
     def _build_lane_change_plan(self, target_lane, direction, steps=25, step_dist=2.0):
+        """
+        Build a short CARLA waypoint plan that performs a lane change and then follows the new lane.
+        Inputs: Target lane waypoint, lane-change direction, number of follow-up steps, and step distance.
+        Outputs: Returns a waypoint plan list for BasicAgent.set_global_plan().
+        """
         plan = []
         wp = target_lane
         option = RoadOption.CHANGELANELEFT if direction == "left" else RoadOption.CHANGELANERIGHT
@@ -357,6 +443,11 @@ class V2VControllerCarla:
         return plan
 
     def _get_path_points(self, count=50):
+        """
+        Extract a finite set of upcoming path points from the current local planner queue.
+        Inputs: Maximum number of points to read from the local plan.
+        Outputs: Returns a list of CARLA Locations representing the upcoming path.
+        """
         plan = list(self.agent.get_local_planner().get_plan())
         points = []
         for wp, _ in plan[:count]:
@@ -366,6 +457,11 @@ class V2VControllerCarla:
         return points
 
     def _path_waypoints(self, points):
+        """
+        Map CARLA locations to driving-lane waypoints along the current path.
+        Inputs: A list of CARLA path locations.
+        Outputs: Returns the corresponding CARLA waypoint list for valid driving lanes.
+        """
         waypoints = []
         for loc in points:
             wp = self.map.get_waypoint(loc, project_to_road=True, lane_type=carla.LaneType.Driving)
@@ -374,6 +470,11 @@ class V2VControllerCarla:
         return waypoints
 
     def _draw_plan_points(self):
+        """
+        Draw the cached global route points for debugging in the CARLA world.
+        Inputs: No additional inputs.
+        Outputs: Renders the cached route points in the CARLA debug layer.
+        """
         if not self._route_points:
             return
         color = carla.Color(255, 220, 0)
@@ -387,6 +488,11 @@ class V2VControllerCarla:
             )
 
     def _path_intersection(self, path_points, seg_start, seg_end):
+        """
+        Find the first geometric intersection between the ego path polyline and another projected segment.
+        Inputs: Ego path points, segment start, and segment end.
+        Outputs: Returns ego distance, other distance, and intersection location, or None.
+        """
         total = 0.0
         for p0, p1 in zip(path_points[:-1], path_points[1:]):
             hit = self._segment_intersection(p0, p1, seg_start, seg_end)
@@ -399,6 +505,11 @@ class V2VControllerCarla:
         return None
 
     def _segment_intersection(self, p0, p1, p2, p3):
+        """
+        Compute the intersection point of two 2D line segments if it exists.
+        Inputs: Four CARLA Locations defining two segments.
+        Outputs: Returns the intersection CARLA Location or None.
+        """
         x1, y1 = p0.x, p0.y
         x2, y2 = p1.x, p1.y
         x3, y3 = p2.x, p2.y
@@ -413,10 +524,20 @@ class V2VControllerCarla:
         return None
 
     def _speed_for_gap(self, ego_speed, distance):
+        """
+        Convert a front-vehicle gap into a reduced target speed using headway and minimum-gap rules.
+        Inputs: Ego speed and longitudinal distance to the lead vehicle.
+        Outputs: Returns a target speed in m/s.
+        """
         gap = max(0.1, distance - self.min_gap)
         return min(self.target_speed_mps, gap / max(0.1, self.time_headway))
 
     def _relative_xy(self, ego_v2v, other_v2v):
+        """
+        Compute the relative 2D position of another vehicle with respect to the ego from V2V data.
+        Inputs: Ego V2V record and another vehicle's V2V record.
+        Outputs: Returns relative dx and dy in the configured V2V position mode.
+        """
         if self.v2v_position_mode == "local":
             ex = ego_v2v.get(self.v2v_x_key)
             ey = ego_v2v.get(self.v2v_y_key)
@@ -428,6 +549,11 @@ class V2VControllerCarla:
         return self._latlon_delta(ego_v2v, other_v2v)
 
     def _latlon_delta(self, ego_v2v, other_v2v):
+        """
+        Convert two geodetic V2V positions into an approximate local Cartesian offset.
+        Inputs: Ego V2V record and another vehicle's V2V record with latitude/longitude.
+        Outputs: Returns relative dx and dy in meters.
+        """
         lat1 = ego_v2v.get(self.v2v_lat_key)
         lon1 = ego_v2v.get(self.v2v_lon_key)
         lat2 = other_v2v.get(self.v2v_lat_key)
@@ -440,6 +566,11 @@ class V2VControllerCarla:
         return dx, dy
 
     def _v2v_to_carla_location(self, ego_v2v, other_v2v):
+        """
+        Convert another vehicle's V2V-reported position into a CARLA location in the current world frame.
+        Inputs: Ego V2V record and another vehicle's V2V record.
+        Outputs: Returns a CARLA Location or None if the V2V position is invalid.
+        """
         if self.v2v_position_mode == "local":
             x = other_v2v.get(self.v2v_x_key)
             y = other_v2v.get(self.v2v_y_key)
@@ -451,6 +582,11 @@ class V2VControllerCarla:
         return carla.Location(x=ego_loc.x + dx, y=ego_loc.y + dy, z=0.0)
 
     def _project_to_heading(self, heading_deg, dx, dy):
+        """
+        Project a relative 2D offset into longitudinal and lateral components under a given heading.
+        Inputs: Heading in degrees and a relative dx, dy vector.
+        Outputs: Returns longitudinal and lateral distances in the heading-aligned frame.
+        """
         heading = math.radians(heading_deg)
         forward_x = math.sin(heading)
         forward_y = math.cos(heading)
@@ -461,13 +597,28 @@ class V2VControllerCarla:
         return longitudinal, lateral
 
     def _project_forward(self, origin, heading_deg, distance):
+        """
+        Project a CARLA location forward along a heading by a given distance.
+        Inputs: Origin location, heading in degrees, and travel distance.
+        Outputs: Returns the forward-projected CARLA Location.
+        """
         heading = math.radians(heading_deg)
         dx = math.sin(heading) * distance
         dy = math.cos(heading) * distance
         return carla.Location(x=origin.x + dx, y=origin.y + dy, z=origin.z)
 
     def _metsr_to_carla_location(self, x, y):
+        """
+        Convert METS-R XY coordinates into a CARLA location.
+        Inputs: METS-R x and y coordinates.
+        Outputs: Returns the corresponding CARLA Location.
+        """
         return carla.Location(x=x, y=-y, z=0.0)
 
     def _to_kmh(self, speed_mps):
+        """
+        Convert speed from meters per second to kilometers per hour.
+        Inputs: Speed in m/s.
+        Outputs: Returns speed in km/h.
+        """
         return speed_mps * 3.6

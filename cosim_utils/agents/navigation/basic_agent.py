@@ -12,12 +12,12 @@ It can also make use of the global route planner to follow a specified route
 import carla
 from shapely.geometry import Polygon
 
-from agents.navigation.local_planner import LocalPlanner, RoadOption
-from agents.navigation.global_route_planner import GlobalRoutePlanner
-from agents.tools.misc import (get_speed, is_within_distance,
+from cosim_utils.agents.navigation.local_planner import LocalPlanner, RoadOption
+from cosim_utils.agents.navigation.global_route_planner import GlobalRoutePlanner
+from cosim_utils.agents.tools.misc import (get_speed, is_within_distance,
                                get_trafficlight_trigger_location)
 
-from agents.tools.hints import ObstacleDetectionResult, TrafficLightDetectionResult
+from cosim_utils.agents.tools.hints import ObstacleDetectionResult, TrafficLightDetectionResult
 
 
 class BasicAgent:

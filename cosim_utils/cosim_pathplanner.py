@@ -3,11 +3,21 @@ import xml.etree.ElementTree as ET
 
 import carla
 
-from agents.navigation.global_route_planner import GlobalRoutePlanner
+from cosim_utils.agents.navigation.global_route_planner import GlobalRoutePlanner
 
 
 class CosimPathPlanner:
+    """
+    Transform a METS-R road-id route into CARLA-trackable coarse points and lane-level path points.
+    Inputs: CARLA world, SUMO net file path, and path sampling parameters.
+    Outputs: Stores coarse_points, lane_waypoints, and related planning results in the instance.
+    """
     def __init__(self, world, net_path, half_road_width=3.5, sampling_resolution=2.0):
+        """
+        Initialize the planner and load the SUMO net, CARLA route planner, and internal caches.
+        Inputs: CARLA world, net file path, half road width, and route sampling resolution.
+        Outputs: Sets up the planner state and cached route containers.
+        """
         self.world = world
         self.map = world.get_map() if world is not None else None
         self.half_road_width = half_road_width
@@ -22,6 +32,11 @@ class CosimPathPlanner:
         self.missing_edges = []
 
     def build_coarse_points(self, route_ids):
+        """
+        Build laterally offset coarse path points by sampling each road in a METS-R route.
+        Inputs: A sequence of METS-R road IDs.
+        Outputs: Returns coarse_points_metsr and updates coarse_points_carla and missing_edges.
+        """
         self.coarse_points_metsr = []
         self.coarse_points_carla = []
         self.missing_edges = []
@@ -52,6 +67,11 @@ class CosimPathPlanner:
         return list(self.coarse_points_metsr)
 
     def build_lane_points(self, route_ids):
+        """
+        Generate a continuous lane-level CARLA path by connecting the coarse route points with GRP.
+        Inputs: A sequence of METS-R road IDs.
+        Outputs: Returns CARLA Locations for the lane path and updates lane_waypoints.
+        """
         if self.grp is None:
             return []
         self.build_coarse_points(route_ids)
@@ -64,6 +84,11 @@ class CosimPathPlanner:
         return [wp.transform.location for wp, _ in self.lane_waypoints]
 
     def draw_coarse_points(self, color=None, size=0.35, life_time=0.0):
+        """
+        Draw the cached coarse path points in the CARLA debug view.
+        Inputs: Optional point color, point size, and debug life time.
+        Outputs: Renders the coarse points in the simulator debug layer.
+        """
         if self.world is None:
             return
         if color is None:
@@ -78,6 +103,11 @@ class CosimPathPlanner:
             )
 
     def draw_lane_points(self, color=None, size=0.12, life_time=0.0):
+        """
+        Draw the cached lane-level path points in the CARLA debug view.
+        Inputs: Optional point color, point size, and debug life time.
+        Outputs: Renders the lane-level points in the simulator debug layer.
+        """
         if self.world is None:
             return
         if color is None:
@@ -92,6 +122,11 @@ class CosimPathPlanner:
             )
 
     def _load_sumo_net(self, net_path):
+        """
+        Load edges and net offset information from a SUMO net.xml file.
+        Inputs: Path to the SUMO net file.
+        Outputs: Returns an edge dictionary and a net_offset tuple.
+        """
         tree = ET.parse(net_path)
         root = tree.getroot()
         location = root.find("location")
@@ -110,6 +145,11 @@ class CosimPathPlanner:
         return edges, net_offset
 
     def _edge_shape_points(self, edge):
+        """
+        Parse the polyline shape points from a SUMO edge XML node.
+        Inputs: A SUMO edge XML element.
+        Outputs: Returns an ordered list of 2D shape points.
+        """
         shape = edge.get("shape")
         if not shape:
             return []
@@ -122,6 +162,11 @@ class CosimPathPlanner:
         return points
 
     def _point_at_fraction(self, points, fraction):
+        """
+        Sample a point on a polyline at a given fraction and return a forward reference point.
+        Inputs: A list of polyline points and a fractional position along the line.
+        Outputs: Returns the sampled point p0 and the next reference point p1.
+        """
         if not points:
             return None, None
         if len(points) < 2:
@@ -150,6 +195,11 @@ class CosimPathPlanner:
         return points[-2], points[-1]
 
     def _end_point(self, points):
+        """
+        Return the final point of a polyline and its previous reference point.
+        Inputs: A list of polyline points.
+        Outputs: Returns the last segment's two points.
+        """
         if not points:
             return None, None
         if len(points) < 2:
@@ -157,6 +207,11 @@ class CosimPathPlanner:
         return points[-2], points[-1]
 
     def _offset_point(self, p0, p1, offset, direction="right"):
+        """
+        Compute a lateral offset point from a segment direction to place the route on a target lane side.
+        Inputs: Two reference points, an offset distance, and an offset direction.
+        Outputs: Returns the offset 2D point.
+        """
         if p0 is None or p1 is None or offset == 0.0:
             return p0
         dx = p1[0] - p0[0]
@@ -173,10 +228,25 @@ class CosimPathPlanner:
         return (p0[0] + ox, p0[1] + oy)
 
     def _sumo_to_metsr(self, point):
+        """
+        Convert a SUMO map point into METS-R coordinates by removing the net offset.
+        Inputs: A SUMO 2D point.
+        Outputs: Returns the corresponding METS-R 2D point.
+        """
         return point[0] - self.net_offset[0], point[1] - self.net_offset[1]
 
     def _metsr_to_carla(self, point):
+        """
+        Convert a METS-R point into a CARLA location.
+        Inputs: A METS-R 2D point.
+        Outputs: Returns a CARLA Location.
+        """
         return carla.Location(x=point[0], y=-point[1], z=0.5)
 
     def _carla_to_metsr(self, location):
+        """
+        Convert a CARLA location into METS-R coordinates.
+        Inputs: A CARLA Location.
+        Outputs: Returns the corresponding METS-R 2D point.
+        """
         return (location.x, -location.y)

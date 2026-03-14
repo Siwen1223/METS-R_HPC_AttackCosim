@@ -1,7 +1,15 @@
+"""
+Historical version from November 2025.
+This script belongs to the early single-scenario prototype line and uses the in-file HeadingAwareController instead of the newer CARLA-side V2VControllerCarla.
+Its control logic is a simple V2V-based acceleration controller with heading-cone filtering, but it still does not use CARLA lane-level path planning, conflict handling, or CARLA-driven route tracking.
+This example focuses on a BSM position-falsification attack at the intersection scenario that later evolved into the newer V2V_BSM_* CARLA-controlled scripts.
+"""
+
 import sys
 from pathlib import Path
-ROOT_DIR = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT_DIR))
+ROOT_DIR = Path(__file__).resolve().parents[2]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 import os
 import time
@@ -268,4 +276,3 @@ if __name__ == '__main__':
     os.chdir("docker")
     os.system("docker-compose down")
     os.chdir("..")
-

@@ -79,14 +79,14 @@ class HeadingAwareController:
 def stop_previous_metsr_containers():
     """Stop all running METS-R SIM containers."""
     try:
-        # 获取运行中的 ennuilei/mets-r_sim 容器ID列表
+        # obtain running ennuilei/mets-r_sim containers list
         result = subprocess.run(
             ["docker", "ps", "-q", "--filter", "ancestor=ennuilei/mets-r_sim"],
             capture_output=True,
             text=True,
         )
         container_ids = result.stdout.strip().split('\n')
-        container_ids = [cid for cid in container_ids if cid]  # 去掉空字符串
+        container_ids = [cid for cid in container_ids if cid]  # remove empty string
 
         if container_ids:
             print(f"Stopping containers: {container_ids}")
@@ -99,7 +99,6 @@ def stop_previous_metsr_containers():
 def kill_process_on_port(port=8000):
     """Kill the process that is using the given port."""
     try:
-        # 查找占用端口的进程
         result = subprocess.run(
             ["lsof", "-i", f":{port}"],
             capture_output=True,
@@ -107,7 +106,6 @@ def kill_process_on_port(port=8000):
         )
         lines = result.stdout.strip().split('\n')
         if len(lines) > 1:
-            # 第一行是表头，第二行开始才是进程
             for line in lines[1:]:
                 parts = line.split()
                 pid = int(parts[1])
@@ -143,7 +141,7 @@ if __name__ == '__main__':
     kafkaDataSender = KafkaDataSender(config)
     kafkaDataProcessor.clear()
 
-    '''# Run simulation
+    # Run simulation
     sim_dirs = prepare_sim_dirs(config)
     run_simulation_in_docker(config)
     print("Run simulation:", sim_dirs)
@@ -172,7 +170,7 @@ if __name__ == '__main__':
         print(key, value)
     sim_client.terminate()
     with open("slow_vehicle_replay.pkl", "wb") as f:
-        pickle.dump(replay_data, f)'''
+        pickle.dump(replay_data, f)
 
     with open("slow_vehicle_replay.pkl", "rb") as f:
         replay_data = pickle.load(f)

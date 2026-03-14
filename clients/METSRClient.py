@@ -518,30 +518,6 @@ class METSRClient:
         assert res["CODE"] == "OK", res["CODE"]
         return res
 
-    # exit cosim region (custom extension)
-    def exit_cosim_region(self, vehID, x, y, private_veh = False, transform_coord = False):
-        msg = {
-                "TYPE": "CTRL_exitCoSimRegion",
-                "DATA": []
-                }
-        if not isinstance(vehID, list):
-            vehID = [vehID]
-            x = [x]
-            y = [y]
-        if not isinstance(private_veh, list):
-            private_veh = [private_veh] * len(vehID)
-        if not isinstance(transform_coord, list):
-            transform_coord = [transform_coord] * len(vehID)
-        
-        for vehID, private_veh, transform_coord, x, y in zip(vehID, private_veh, transform_coord, x, y):
-            msg["DATA"].append({"vehID": vehID, "vehType": private_veh, "transformCoord": transform_coord, "x": x, "y": y})
-
-        res = self.send_receive_msg(msg, ignore_heartbeats=True)
-        assert res["TYPE"] == "CTRL_exitCoSimRegion", res["TYPE"]
-        assert res["CODE"] == "OK", res["CODE"]
-        
-        return res
-
     # reach destination
     def reach_dest(self, vehID, private_veh = False):
         msg = {
@@ -1092,3 +1068,29 @@ class METSRClient:
             f"address :\t {self.uri}\n" \
             f"state :\t {self.state}\n" 
         return s
+
+    # local extension: this method does not exist in the upstream main branch.
+    # It is currently used to hand a vehicle back to METS-R after it leaves the
+    # co-simulation area, including its exit position and optional coordinate transform.
+    def exit_cosim_region(self, vehID, x, y, private_veh = False, transform_coord = False):
+        msg = {
+                "TYPE": "CTRL_exitCoSimRegion",
+                "DATA": []
+                }
+        if not isinstance(vehID, list):
+            vehID = [vehID]
+            x = [x]
+            y = [y]
+        if not isinstance(private_veh, list):
+            private_veh = [private_veh] * len(vehID)
+        if not isinstance(transform_coord, list):
+            transform_coord = [transform_coord] * len(vehID)
+        
+        for vehID, private_veh, transform_coord, x, y in zip(vehID, private_veh, transform_coord, x, y):
+            msg["DATA"].append({"vehID": vehID, "vehType": private_veh, "transformCoord": transform_coord, "x": x, "y": y})
+
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_exitCoSimRegion", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        
+        return res

@@ -1,7 +1,15 @@
+"""
+Multi-vehicle extension of the Town05 intersection BSM position-falsification scenario.
+This script generalizes the single-intersection attack setup to multiple vehicles simultaneously traversing the same intersection from different directions under co-simulation.
+Like the other current mainline co-simulation examples, it uses V2VControllerCarla and CARLA-side route tracking/control within the co-simulation area.
+Compared with V2V_BSM_PosFalsifi_intersec.py and V2V_BSM_PosFalsifi_intersec_run.py, this file focuses on denser vehicle interaction rather than the minimal two-vehicle case or dataset saving.
+"""
+
 import sys
 from pathlib import Path
-ROOT_DIR = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT_DIR))
+ROOT_DIR = Path(__file__).resolve().parents[2]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 import os
 import time
@@ -15,7 +23,7 @@ from utils.carla_util import open_carla
 from clients.CoSimClient import CoSimClient
 from clients.KafkaDataProcessor import KafkaDataProcessor
 from clients.KafkaDataSender import KafkaDataSender
-from attack_data_collect_sim.v2v_controller_carla import V2VControllerCarla
+from cosim_utils.v2v_controller_carla import V2VControllerCarla
 
 import subprocess
 import signal

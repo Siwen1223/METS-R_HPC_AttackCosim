@@ -28,7 +28,7 @@ def sample_segment_points(wp_start: carla.Waypoint, wp_end: carla.Waypoint, step
     return pts
 
 
-def draw_town05_road_ids(
+def draw_town_road_ids(
     host="localhost",
     port=2000,
     town="Town05",
@@ -54,15 +54,14 @@ def draw_town05_road_ids(
         road_polylines[rid].append(pts)
         road_points_for_label[rid].append(pts[len(pts)//2])
 
-    # ===== 关键改动 1：为每个 road_id 分配颜色 =====
+    # ===== asign a color for every road_id  =====
     road_ids = sorted(road_polylines.keys())
-    cmap = cm.get_cmap("tab20", len(road_ids))  # 离散、区分度高
+    cmap = cm.get_cmap("tab20", len(road_ids))
     road_color = {rid: cmap(i) for i, rid in enumerate(road_ids)}
 
-    # ===== 绘图 =====
     plt.figure(figsize=(12, 12))
 
-    # 画路网
+    # PLot the road network
     for rid, polylines in road_polylines.items():
         color = road_color[rid]
         for pts in polylines:
@@ -81,7 +80,7 @@ def draw_town05_road_ids(
                     head_length=2.0
                 )
 
-    # 标 road_id（颜色与 road 一致）
+    # Label road_id
     for rid, mids in road_points_for_label.items():
         mx = sum(p[0] for p in mids) / len(mids)
         my = sum(p[1] for p in mids) / len(mids)
@@ -106,4 +105,4 @@ def draw_town05_road_ids(
 
 
 if __name__ == "__main__":
-    draw_town05_road_ids(town="Town05", step=2.0)
+    draw_town_road_ids(town="Town05", step=2.0)

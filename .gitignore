@@ -31,3 +31,6 @@ expResult/
 # IDE & OS
 .vscode/
 .DS_Store
+
+# test
+test.py

@@ -11,7 +11,7 @@ It can also make use of the global route planner to follow a specified route
 
 import carla
 
-from agents.navigation.basic_agent import BasicAgent
+from cosim_utils.agents.navigation.basic_agent import BasicAgent
 
 class ConstantVelocityAgent(BasicAgent):
     """

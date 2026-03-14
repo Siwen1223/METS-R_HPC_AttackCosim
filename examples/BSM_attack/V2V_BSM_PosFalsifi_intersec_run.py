@@ -1,7 +1,15 @@
+"""
+Dataset-oriented version of the single-intersection BSM position-falsification scenario.
+This script extends V2V_BSM_PosFalsifi_intersec.py by keeping the same attack and driving setup while additionally saving run metadata, BSM logs, sensor outputs, vehicle states, and events.
+Like the other current mainline co-simulation examples, it uses V2VControllerCarla and CARLA-side route tracking/control inside the co-simulation area.
+Compared with the other V2V_BSM_* scripts, this file is intended for structured dataset generation rather than only interactive simulation and visualization.
+"""
+
 import sys
 from pathlib import Path
-ROOT_DIR = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT_DIR))
+ROOT_DIR = Path(__file__).resolve().parents[2]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 import os
 import time
@@ -12,8 +20,8 @@ from utils.carla_util import open_carla
 from clients.CoSimClient import CoSimClient
 from clients.KafkaDataProcessor import KafkaDataProcessor
 from clients.KafkaDataSender import KafkaDataSender
-from attack_data_collect_sim.v2v_controller_carla import V2VControllerCarla
-from attack_data_collect_sim.run_data_saver import RunDataSaver
+from cosim_utils.v2v_controller_carla import V2VControllerCarla
+from cosim_utils.run_data_saver import RunDataSaver
 
 import subprocess
 import signal

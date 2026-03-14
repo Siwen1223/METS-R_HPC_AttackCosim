@@ -9,7 +9,7 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT_DIR))
 
 from utils.util import read_run_config
-from agents.navigation.global_route_planner import GlobalRoutePlanner
+from cosim_utils.agents.navigation.global_route_planner import GlobalRoutePlanner
 
 
 def parse_args():

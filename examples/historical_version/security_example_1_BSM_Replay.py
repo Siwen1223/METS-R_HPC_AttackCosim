@@ -1,7 +1,15 @@
+"""
+Historical version from November 2025.
+This script belongs to the early single-scenario prototype line and uses the in-file HeadingAwareController instead of the newer CARLA-side V2VControllerCarla.
+Its control logic is a simple V2V-based acceleration controller that uses basic front-vehicle distance checks rather than CARLA lane-level path planning, conflict handling, and route tracking.
+This example focuses on a BSM replay attack workflow, including collecting a BSM sequence, replaying it through Kafka, and observing the attacked vehicle behavior.
+"""
+
 import sys
 from pathlib import Path
-ROOT_DIR = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT_DIR))
+ROOT_DIR = Path(__file__).resolve().parents[2]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 import os
 import time

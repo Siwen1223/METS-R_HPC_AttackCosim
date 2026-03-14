@@ -1,7 +1,15 @@
+"""
+Main no-attack baseline for the Town05 intersection co-simulation scenario.
+This script runs the same two-vehicle intersection setup as the attack versions, but without injecting falsified V2V messages.
+Unlike the older historical examples, it uses the CARLA-driven V2VControllerCarla and CARLA-side path planning/control inside the co-simulation area.
+Compared with the other V2V_BSM_* scripts, this file is the clean reference run used to observe nominal behavior under the same routing and co-simulation configuration.
+"""
+
 import sys
 from pathlib import Path
-ROOT_DIR = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT_DIR))
+ROOT_DIR = Path(__file__).resolve().parents[2]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 import os
 import time
@@ -12,7 +20,7 @@ from utils.util import read_run_config, prepare_sim_dirs, run_simulation_in_dock
 from utils.carla_util import open_carla
 from clients.CoSimClient import CoSimClient
 from clients.KafkaDataProcessor import KafkaDataProcessor 
-from attack_data_collect_sim.v2v_controller_carla import V2VControllerCarla
+from cosim_utils.v2v_controller_carla import V2VControllerCarla
 
 import subprocess
 import signal

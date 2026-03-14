@@ -1,7 +1,15 @@
+"""
+Single-intersection BSM position-falsification attack scenario for Town05 co-simulation.
+This script uses the same two-vehicle setup as V2V_BSM_intersec.py, but injects falsified BSM messages to create a fake obstacle effect near the intersection.
+Unlike the historical HeadingAwareController versions, it relies on V2VControllerCarla and CARLA-side route tracking/control within the co-simulation region.
+Compared with the other V2V_BSM_* scripts, this file is the main attack demo without the dataset-oriented run saver and without the multi-vehicle extension.
+"""
+
 import sys
 from pathlib import Path
-ROOT_DIR = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT_DIR))
+ROOT_DIR = Path(__file__).resolve().parents[2]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 import os
 import time
@@ -13,7 +21,7 @@ from utils.carla_util import open_carla
 from clients.CoSimClient import CoSimClient
 from clients.KafkaDataProcessor import KafkaDataProcessor 
 from clients.KafkaDataSender import KafkaDataSender
-from attack_data_collect_sim.v2v_controller_carla import V2VControllerCarla
+from cosim_utils.v2v_controller_carla import V2VControllerCarla
 
 import subprocess
 import signal
