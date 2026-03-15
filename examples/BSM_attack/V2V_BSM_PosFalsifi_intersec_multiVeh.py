@@ -23,6 +23,7 @@ from utils.carla_util import open_carla
 from clients.CoSimClient import CoSimClient
 from clients.KafkaDataProcessor import KafkaDataProcessor
 from clients.KafkaDataSender import KafkaDataSender
+from cosim_utils.run_data_saver import RunDataSaver
 from cosim_utils.v2v_controller_carla import V2VControllerCarla
 
 import subprocess
@@ -206,6 +207,46 @@ def derive_carla_roads(carla_world, network_file, metsr_roads, sample_step=5.0, 
     return sorted(road_ids), best_mode
 
 
+def print_controller_debug(tick, controllers, cosim_client, min_pair_distance=8.0):
+    active_vids = sorted(
+        vid for vid in controllers
+        if cosim_client.carla_entered.get(vid, False) and cosim_client.carla_vehs.get(vid) is not None
+    )
+    if not active_vids:
+        return
+
+    print(f"\n[debug] tick={tick}")
+    for vid in active_vids:
+        vehicle = cosim_client.carla_vehs.get(vid)
+        state = controllers[vid].get_last_debug_state()
+        loc = vehicle.get_location()
+        yaw = vehicle.get_transform().rotation.yaw
+        bearing = (yaw + 90.0) % 360.0
+        speed = vehicle.get_velocity()
+        speed_mps = (speed.x * speed.x + speed.y * speed.y + speed.z * speed.z) ** 0.5
+        print(
+            f"  veh={vid} loc=({loc.x:.2f},{loc.y:.2f}) bearing={bearing:.2f} speed={speed_mps:.2f} "
+            f"lead={state.get('lead_vid')} lead_d={state.get('lead_distance')} "
+            f"conflict={state.get('conflict_vid')} conflict_d={state.get('conflict_distance')} "
+            f"factor={state.get('conflict_speed_factor')} junction_blocked={state.get('junction_blocked')} "
+            f"ctrl=(thr={state.get('control_throttle')}, brk={state.get('control_brake')}, steer={state.get('control_steer')})"
+        )
+
+    for i, vid_a in enumerate(active_vids):
+        veh_a = cosim_client.carla_vehs.get(vid_a)
+        if veh_a is None:
+            continue
+        loc_a = veh_a.get_location()
+        for vid_b in active_vids[i + 1:]:
+            veh_b = cosim_client.carla_vehs.get(vid_b)
+            if veh_b is None:
+                continue
+            loc_b = veh_b.get_location()
+            dist = loc_a.distance(loc_b)
+            if dist <= min_pair_distance:
+                print(f"  [pair-close] veh={vid_a} veh={vid_b} dist={dist:.2f} m")
+
+
 if __name__ == "__main__":
     force_restart = True
     if force_restart:
@@ -305,11 +346,42 @@ if __name__ == "__main__":
     }]]
 
     controller_vids = [1, 2, 3, 4]
+    vehicle_with_sensors = list(controller_vids)
+    for vid in vehicle_with_sensors:
+        cosim_client.enable_vehicle_sensor(vid)
+
     controllers = {}
     route_synced = {}
     last_stream = []
     dt = getattr(config, "sim_step_size", 0.1)
     net_path = (ROOT_DIR / config.network_file).resolve()
+    debug_every_n = 5
+    debug_pair_distance = 10.0
+    max_steps = 300
+
+    dataset_root = ROOT_DIR / "V2X-Attack-Dataset"
+    attack_info = {
+        "attack_type": "BSM_replay",
+        "attack_enabled": True,
+        "start_time": 0.0,
+        "end_time": 200 * dt,
+        "parameters": {
+            "fake_vehicle_id": 0,
+        },
+    }
+    meta_info = {
+        "scenario": "V2V_BSM_PosFalsifi_intersec_multiVeh",
+        "map": getattr(config, "carla_map", None),
+        "random_seed": config.random_seeds[0] if getattr(config, "random_seeds", None) else None,
+        "sim_step_size": dt,
+        "sim_fps": 1.0 / dt if dt else None,
+        "max_steps": max_steps,
+        "planned_duration_sec": max_steps * dt,
+        "vehicle_ids": controller_vids,
+        "sensor_vehicle_ids": vehicle_with_sensors,
+    }
+    data_saver = RunDataSaver(dataset_root, meta_info, attack_info, sensor_every_n=5)
+    data_saver.log_event(0.0, "Simulation started")
 
     def init_controller_for_vid(vid):
         if vid in controllers:
@@ -329,7 +401,9 @@ if __name__ == "__main__":
         route_synced[vid] = False
 
     try:
-        for i in range(300):
+        sim_time = 0.0
+        for i in range(max_steps):
+            sim_time = i * dt
             for vid in controller_vids:
                 init_controller_for_vid(vid)
 
@@ -347,9 +421,10 @@ if __name__ == "__main__":
                     continue
                 control = controller.run_step(last_stream, dt=dt)
                 carla_vehicle.apply_control(control)
+                data_saver.record_control(i, sim_time, vid, control)
 
             # Same attack pattern as single-intersection demo.
-            if i <= 265:
+            if i <= 200:
                 for data in replay_data[0]:
                     kafkaDataSender.send("bsm", data)
 
@@ -379,14 +454,26 @@ if __name__ == "__main__":
             for vid in done_vids:
                 controllers.pop(vid, None)
                 route_synced.pop(vid, None)
+                data_saver.log_event(sim_time, f"Vehicle {vid} finished route")
+
+            if i % data_saver.sensor_every_n == 0:
+                data_saver.save_sensors(cosim_client)
+
+            data_saver.record_vehicle_state(i, sim_time, cosim_client)
 
             data_stream = kafkaDataProcessor.process()
             if data_stream is not None:
                 last_stream = data_stream
+                data_saver.record_bsm(i, sim_time, data_stream)
+            if i % debug_every_n == 0:
+                print_controller_debug(i, controllers, cosim_client, min_pair_distance=debug_pair_distance)
             time.sleep(0.08)
 
     except KeyboardInterrupt:
         print("\nSimulation interrupted by user")
+    finally:
+        data_saver.log_event(sim_time, "Simulation ended")
+        data_saver.finalize(duration_sec=sim_time)
 
     cosim_client.metsr.terminate()
     os.chdir("docker")

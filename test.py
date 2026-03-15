@@ -88,4 +88,4 @@ def draw_town05_road_ids(host="localhost", port=2000, town="Town05", step=2.0, s
     plt.show()
 
 if __name__ == "__main__":
-    draw_town05_road_ids(town="Town05", step=2.0, show_lane_direction=False)
+    #draw_town05_road_ids(town="Town05", step=2.0, show_lane_direction=False)

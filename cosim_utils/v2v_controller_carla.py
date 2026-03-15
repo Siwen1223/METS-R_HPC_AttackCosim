@@ -27,11 +27,13 @@ class V2VControllerCarla:
         min_gap=2.5,
         lane_half_width=2.0,
         conflict_horizon_s=4.0,
-        conflict_time_gap=1.0,
+        conflict_time_gap=2.5,
         conflict_time_safe=3.0,
         conflict_ignore_dist=2.0,
         conflict_max_dist=40.0,
+        conflict_min_projection_dist=20.0,
         junction_yield_radius=12.0,
+        junction_stop_buffer=3.0,
         lane_change_lookahead_s=4.0,
         enable_overtake_lane_change=False,
         enable_debug_draw=False,
@@ -59,7 +61,9 @@ class V2VControllerCarla:
         self.conflict_time_safe = conflict_time_safe
         self.conflict_ignore_dist = conflict_ignore_dist
         self.conflict_max_dist = conflict_max_dist
+        self.conflict_min_projection_dist = conflict_min_projection_dist
         self.junction_yield_radius = junction_yield_radius
+        self.junction_stop_buffer = junction_stop_buffer
         self.lane_change_lookahead_s = lane_change_lookahead_s
         self.enable_overtake_lane_change = enable_overtake_lane_change
         self.enable_debug_draw = enable_debug_draw
@@ -79,6 +83,9 @@ class V2VControllerCarla:
         }
         self.agent = BasicAgent(self.vehicle, target_speed=self._to_kmh(target_speed_mps), opt_dict=opt_dict, map_inst=self.map)
         self._route_points = []
+        self._last_debug_state = {}
+
+    # Route setup API.
 
     def set_destination_xy(self, end_xy, start_xy=None, clean_queue=True):
         """
@@ -137,39 +144,85 @@ class V2VControllerCarla:
         )
         return True
 
+    # Public control API.
+
     def run_step(self, data_stream, dt=0.05):
         """
         Compute one control step using V2V-aware following, conflict handling, and route tracking logic.
         Inputs: Current V2V data stream and controller time step.
         Outputs: Returns a CARLA VehicleControl command for the ego vehicle.
         """
+        # Start from the nominal cruise target and the current ego speed.
         ego_speed = max(0.0, get_speed(self.vehicle) / 3.6)
         desired_speed = self.target_speed_mps
 
+        # Count down any active lane-change cooldown so we do not keep replanning every tick.
         if self._lane_change_cooldown > 0.0:
             self._lane_change_cooldown = max(0.0, self._lane_change_cooldown - dt)
 
-        ego_v2v = self._get_ego_v2v(data_stream)
-        path_points = self._get_path_points()
+        # Gather the ego V2V state and the short CARLA path segment used for all downstream checks.
+        ego_v2v = self._v2v_ego_record(data_stream)
+        path_points = self._path_points()
 
-        self._ensure_turn_lane(ego_speed, ego_v2v, data_stream, dt)
-        lead = self._find_lead_vehicle(ego_v2v, data_stream)
+        # If a turn is coming up, try to move into the appropriate turn lane before the junction.
+        self._lane_ensure_turn_alignment(ego_speed, ego_v2v, data_stream)
+
+        # Check whether there is a same-lane vehicle ahead that should trigger car-following behavior.
+        lead = self._decision_lead_vehicle(ego_v2v, data_stream)
         if lead is not None:
-            desired_speed = min(desired_speed, self._speed_for_gap(ego_speed, lead["distance"]))
+            # A lead vehicle means the ego should honor longitudinal headway instead of free cruising.
+            desired_speed = min(desired_speed, self._decision_speed_from_gap(ego_speed, lead["distance"]))
 
-        conflict = self._find_conflict_vehicle(ego_v2v, data_stream, path_points, ego_speed)
+        # Check for the most relevant crossing vehicle and reduce speed if a time-critical conflict exists.
+        conflict = self._decision_conflict_vehicle(ego_v2v, data_stream, path_points, ego_speed)
         if conflict is not None:
+            # A crossing conflict means we keep moving only at the yield factor selected by the conflict logic.
             desired_speed = min(desired_speed, ego_speed * conflict["speed_factor"])
 
-        if self._junction_blocked(ego_v2v, data_stream, path_points):
-            desired_speed = 0.0
+        # Before entering a junction, stop or slow if another truly intersecting flow is already occupying it.
+        junction_blocked = self._decision_junction_blocked(ego_v2v, data_stream, path_points)
+        junction_entry_dist = self._path_distance_to_junction_entry(path_points) if junction_blocked else None
+        if junction_blocked:
+            if junction_entry_dist is None:
+                # Fallback: if we cannot estimate a stop line distance, use a full stop.
+                desired_speed = 0.0
+            else:
+                # Otherwise taper speed toward the junction entry so the ego stops near the stop line.
+                desired_speed = min(
+                    desired_speed,
+                    self._decision_speed_to_stop_line(junction_entry_dist),
+                )
 
+        # Optionally try an overtaking lane change if a slow lead vehicle is blocking progress.
         if self.enable_overtake_lane_change:
-            self._maybe_request_lane_change(lead, ego_v2v, data_stream, dt)
+            # Only consider overtaking when this optional behavior is enabled by the scenario.
+            self._lane_try_overtake(lead, ego_v2v, data_stream)
+
+        # Hand the final speed target to BasicAgent and let it generate the low-level CARLA control.
         self.agent.set_target_speed(self._to_kmh(desired_speed))
         control = self.agent.run_step()
+
+        # Cache a compact summary so the outer script can print one-line debug state per vehicle.
+        self._last_debug_state = {
+            "ego_vid": self.ego_vid,
+            "ego_speed": ego_speed,
+            "desired_speed": desired_speed,
+            "lead_vid": lead["vehicle"].get("vid") if lead is not None else None,
+            "lead_distance": lead["distance"] if lead is not None else None,
+            "conflict_vid": conflict["vehicle"].get("vid") if conflict is not None else None,
+            "conflict_distance": conflict["distance"] if conflict is not None else None,
+            "conflict_speed_factor": conflict["speed_factor"] if conflict is not None else None,
+            "junction_blocked": junction_blocked,
+            "junction_entry_distance": junction_entry_dist,
+            "path_point_count": len(path_points),
+            "control_throttle": control.throttle,
+            "control_brake": control.brake,
+            "control_steer": control.steer,
+        }
+
+        # Keep route points visible in CARLA when debug drawing is enabled.
         if self.enable_debug_draw:
-            self._draw_plan_points()
+            self._route_draw_points()
         return control
 
     def is_route_complete(self):
@@ -180,6 +233,14 @@ class V2VControllerCarla:
         """
         return self.agent.done()
 
+    def get_last_debug_state(self):
+        """
+        Return the cached debug summary from the most recent control step.
+        Inputs: No additional inputs.
+        Outputs: Returns a dictionary containing the latest lead/conflict/junction/control diagnostics.
+        """
+        return dict(self._last_debug_state)
+
     def get_metsr_state(self):
         """
         Export the ego vehicle state in the coordinate/bearing format expected by METS-R.
@@ -188,21 +249,15 @@ class V2VControllerCarla:
         """
         loc = self.vehicle.get_location()
         yaw = self.vehicle.get_transform().rotation.yaw
+        # Verified with the current Town05 co-sim setup:
+        # CARLA yaw 0 deg points along +x, while METS-R/BSM heading 90 deg
+        # points along the same world direction. Therefore bearing = yaw + 90.
         bearing = (yaw + 90.0) % 360.0
         return loc.x, -loc.y, bearing
 
-    def _get_ego_v2v(self, data_stream):
-        """
-        Find the ego vehicle record in the current V2V data stream.
-        Inputs: A list of V2V message dictionaries.
-        Outputs: Returns the ego V2V dictionary or None if it is missing.
-        """
-        for v in data_stream:
-            if v.get("vid") == self.ego_vid:
-                return v
-        return None
+    # Decision helpers.
 
-    def _find_lead_vehicle(self, ego_v2v, data_stream):
+    def _decision_lead_vehicle(self, ego_v2v, data_stream):
         """
         Find the closest vehicle ahead of the ego within the current lane-width envelope.
         Inputs: The ego V2V record and the full V2V data stream.
@@ -213,137 +268,133 @@ class V2VControllerCarla:
         ego_heading = ego_v2v.get("heading", 0.0)
         best = None
         best_dist = float("inf")
-        for v in data_stream:
-            if v.get("vid") == self.ego_vid:
-                continue
-            dx, dy = self._relative_xy(ego_v2v, v)
-            longitudinal, lateral = self._project_to_heading(ego_heading, dx, dy)
-            if longitudinal <= 0.0:
-                continue
-            if abs(lateral) > self.lane_half_width:
+        for other_v2v in self._v2v_other_records(data_stream):
+            dx, dy = self._v2v_relative_xy(ego_v2v, other_v2v)
+            longitudinal, lateral = self._geom_project_to_heading(ego_heading, dx, dy)
+            if longitudinal <= 0.0 or abs(lateral) > self.lane_half_width:
                 continue
             if longitudinal < best_dist:
                 best_dist = longitudinal
-                best = v
+                best = other_v2v
         if best is None:
             return None
         return {"vehicle": best, "distance": best_dist}
 
-    def _find_conflict_vehicle(self, ego_v2v, data_stream, path_points, ego_speed):
+    def _decision_conflict_vehicle(self, ego_v2v, data_stream, path_points, ego_speed):
         """
         Detect the most relevant crossing-conflict vehicle based on predicted intersection timing along the ego path.
         Inputs: Ego V2V record, full V2V data stream, ego path points, and ego speed.
         Outputs: Returns a conflict dictionary with speed_factor information or None.
         """
-        # Skip if no ego data or insufficient path geometry.
+        # No conflict search is possible without ego V2V data or a usable path polyline.
         if ego_v2v is None or len(path_points) < 2:
             return None
+
         best = None
         best_gap = float("inf")
-        for v in data_stream:
-            # Ignore self.
-            if v.get("vid") == self.ego_vid:
+        for other_v2v in self._v2v_other_records(data_stream):
+            conflict_state = self._conflict_state(ego_v2v, other_v2v, path_points)
+            # Skip vehicles whose projected motion never intersects the ego path.
+            if conflict_state is None:
                 continue
-            other_loc = self._v2v_to_carla_location(ego_v2v, v)
-            # Skip vehicles without a valid position.
-            if other_loc is None:
-                continue
-            other_speed = max(0.1, v.get("velocity", 0.0))
-            other_heading = v.get("heading", 0.0)
-            other_end = self._project_forward(other_loc, other_heading, other_speed * self.conflict_horizon_s)
-            hit = self._path_intersection(path_points, other_loc, other_end)
-            # Skip if their projected path does not intersect ours.
-            if hit is None:
-                continue
-            ego_dist, other_dist, hit_loc = hit
-            # Ignore if the conflict point is effectively at the ego's current position. Avoid deadlock.
+
+            ego_dist = conflict_state["ego_dist"]
+            other_dist = conflict_state["other_dist"]
+            # Ignore a conflict point that is effectively under the ego already; this avoids self-deadlock.
             if ego_dist < self.conflict_ignore_dist:
                 continue
-            ego_heading = ego_v2v.get("heading", 0.0)
-            ego_loc = self.vehicle.get_location()
-            dx_e = hit_loc.x - ego_loc.x
-            dy_e = hit_loc.y - ego_loc.y
-            ego_long, _ = self._project_to_heading(ego_heading, dx_e, dy_e)
-            # Skip if the conflict point is behind the ego vehicle.
-            if ego_long <= 0.0:
+            # Reject intersections that lie behind either vehicle instead of ahead along its travel direction.
+            if conflict_state["ego_long"] <= 0.0 or conflict_state["other_long"] <= 0.0:
                 continue
-            dx_o = hit_loc.x - other_loc.x
-            dy_o = hit_loc.y - other_loc.y
-            other_long, _ = self._project_to_heading(other_heading, dx_o, dy_o)
-            # Skip if the conflict point is behind the other vehicle.
-            if other_long <= 0.0:
-                continue
-            # Skip conflicts that are too far away from either vehicle.
+            # Ignore crossings that are too far away to matter for near-term control.
             if ego_dist > self.conflict_max_dist or other_dist > self.conflict_max_dist:
                 continue
+
             ego_time = ego_dist / max(0.1, ego_speed)
-            other_time = other_dist / other_speed
-            # Skip if the other vehicle is clearly earlier than the ego.
+            other_time = other_dist / conflict_state["other_speed"]
+            # Drop cases where the other vehicle is clearly going to clear the conflict long before ego arrives.
             if other_time < ego_time - self.conflict_time_safe:
                 continue
-            # Skip if the other vehicle is clearly later than the ego.
+            # Drop cases where the other vehicle is clearly far enough behind that it is not an immediate conflict.
             if other_time > ego_time + self.conflict_time_safe:
                 continue
+
             gap = abs(ego_time - other_time)
-            # Accept conflicts only inside the time-gap window and keep the closest gap.
+            # Keep only the closest-in-time conflict that falls inside the active conflict window.
             if gap < self.conflict_time_gap and gap < best_gap:
                 best_gap = gap
+                # If ego arrives first, only soften speed; otherwise yield more aggressively.
                 speed_factor = 0.8 if ego_time < other_time else 0.3
-                best = {"vehicle": v, "distance": ego_dist, "speed_factor": speed_factor}
+                best = {
+                    "vehicle": other_v2v,
+                    "distance": ego_dist,
+                    "speed_factor": speed_factor,
+                }
         return best
 
-    def _junction_blocked(self, ego_v2v, data_stream, path_points):
+    def _decision_junction_blocked(self, ego_v2v, data_stream, path_points):
         """
-        Check whether another vehicle is occupying a relevant junction area ahead of the ego path.
+        Check whether a true crossing vehicle is already occupying or about to occupy the ego junction path.
         Inputs: Ego V2V record, full V2V data stream, and ego path points.
         Outputs: Returns True if the junction should be treated as blocked, otherwise False.
         """
-        if ego_v2v is None or not path_points:
+        if ego_v2v is None or len(path_points) < 2:
             return False
-        if not any(wp.is_junction for wp in self._path_waypoints(path_points)):
+
+        ego_wp = self.map.get_waypoint(
+            self.vehicle.get_location(),
+            project_to_road=True,
+            lane_type=carla.LaneType.Driving,
+        )
+        if ego_wp is None or ego_wp.is_junction:
             return False
-        for v in data_stream:
-            if v.get("vid") == self.ego_vid:
+
+        junction_points = self._path_junction_points(path_points)
+        if len(junction_points) < 2:
+            return False
+
+        for other_v2v in self._v2v_other_records(data_stream):
+            conflict_state = self._conflict_state(ego_v2v, other_v2v, junction_points)
+            if conflict_state is None:
                 continue
-            other_loc = self._v2v_to_carla_location(ego_v2v, v)
-            if other_loc is None:
+            if conflict_state["ego_long"] <= 0.0 or conflict_state["other_long"] <= 0.0:
                 continue
-            wp = self.map.get_waypoint(other_loc, project_to_road=True, lane_type=carla.LaneType.Driving)
-            if wp is None or not wp.is_junction:
+
+            other_wp = self.map.get_waypoint(
+                conflict_state["other_loc"],
+                project_to_road=True,
+                lane_type=carla.LaneType.Driving,
+            )
+            if other_wp is None:
                 continue
-            if other_loc.distance(path_points[0]) < self.junction_yield_radius:
+            if other_wp.is_junction or conflict_state["other_dist"] < self.junction_yield_radius:
                 return True
         return False
 
-    def _maybe_request_lane_change(self, lead, ego_v2v, data_stream, dt):
+    def _decision_speed_from_gap(self, ego_speed, distance):
         """
-        Attempt an overtaking lane change when enabled and the current lead vehicle is too close.
-        Inputs: Lead-vehicle info, ego V2V record, full V2V data stream, and controller time step.
-        Outputs: May replace the current agent plan and update the lane-change cooldown.
+        Convert a front-vehicle gap into a reduced target speed using headway and minimum-gap rules.
+        Inputs: Ego speed and longitudinal distance to the lead vehicle.
+        Outputs: Returns a target speed in m/s.
         """
-        if self._lane_change_cooldown > 0.0:
-            return
-        if lead is None or lead["distance"] > 15.0:
-            return
-        ego_loc = self.vehicle.get_location()
-        ego_wp = self.map.get_waypoint(ego_loc, project_to_road=True, lane_type=carla.LaneType.Driving)
-        if ego_wp is None:
-            return
-        for direction in ("left", "right"):
-            target_lane = ego_wp.get_left_lane() if direction == "left" else ego_wp.get_right_lane()
-            if target_lane is None or target_lane.lane_type != carla.LaneType.Driving:
-                continue
-            if self._lane_clear(target_lane, ego_v2v, data_stream):
-                plan = self._build_lane_change_plan(target_lane, direction)
-                if plan:
-                    self.agent.set_global_plan(plan, clean_queue=True)
-                    self._lane_change_cooldown = 3.0
-                break
+        gap = max(0.1, distance - self.min_gap)
+        return min(self.target_speed_mps, gap / max(0.1, self.time_headway))
 
-    def _ensure_turn_lane(self, ego_speed, ego_v2v, data_stream, dt):
+    def _decision_speed_to_stop_line(self, distance_to_stop_line):
+        """
+        Convert remaining distance to a junction stop line into a smooth target speed cap.
+        Inputs: Distance from the ego to the junction entry along the planned path.
+        Outputs: Returns a target speed in m/s that aims to stop shortly before the junction.
+        """
+        remaining = max(0.0, distance_to_stop_line - self.junction_stop_buffer)
+        return min(self.target_speed_mps, remaining / max(0.1, self.time_headway))
+
+    # Lane-change helpers.
+
+    def _lane_ensure_turn_alignment(self, ego_speed, ego_v2v, data_stream):
         """
         Move the ego into a required turn lane before an upcoming intersection maneuver.
-        Inputs: Ego speed, ego V2V record, full V2V data stream, and controller time step.
+        Inputs: Ego speed, ego V2V record, and full V2V data stream.
         Outputs: May replace the current agent plan and update the lane-change cooldown.
         """
         if self._lane_change_cooldown > 0.0:
@@ -358,24 +409,61 @@ class V2VControllerCarla:
         _, road_option = incoming
         if road_option not in (RoadOption.LEFT, RoadOption.RIGHT):
             return
-        if self._plan_has_lane_change(road_option):
+        if self._lane_plan_has_change(road_option):
             return
-        ego_loc = self.vehicle.get_location()
-        ego_wp = self.map.get_waypoint(ego_loc, project_to_road=True, lane_type=carla.LaneType.Driving)
+
+        ego_wp = self.map.get_waypoint(
+            self.vehicle.get_location(),
+            project_to_road=True,
+            lane_type=carla.LaneType.Driving,
+        )
         if ego_wp is None:
             return
+
         direction = "left" if road_option == RoadOption.LEFT else "right"
         target_lane = ego_wp.get_left_lane() if direction == "left" else ego_wp.get_right_lane()
         if target_lane is None or target_lane.lane_type != carla.LaneType.Driving:
             return
         if not self._lane_change_allowed(ego_wp, direction):
             return
-        if not self._lane_clear(target_lane, ego_v2v, data_stream):
+        if not self._lane_is_clear(target_lane, ego_v2v, data_stream):
             return
-        plan = self._build_lane_change_plan(target_lane, direction)
+
+        plan = self._lane_change_plan(target_lane, direction)
         if plan:
             self.agent.set_global_plan(plan, clean_queue=True)
             self._lane_change_cooldown = 3.0
+
+    def _lane_try_overtake(self, lead, ego_v2v, data_stream):
+        """
+        Attempt an overtaking lane change when enabled and the current lead vehicle is too close.
+        Inputs: Lead-vehicle info, ego V2V record, and full V2V data stream.
+        Outputs: May replace the current agent plan and update the lane-change cooldown.
+        """
+        if self._lane_change_cooldown > 0.0:
+            return
+        if lead is None or lead["distance"] > 15.0:
+            return
+
+        ego_wp = self.map.get_waypoint(
+            self.vehicle.get_location(),
+            project_to_road=True,
+            lane_type=carla.LaneType.Driving,
+        )
+        if ego_wp is None:
+            return
+
+        for direction in ("left", "right"):
+            target_lane = ego_wp.get_left_lane() if direction == "left" else ego_wp.get_right_lane()
+            if target_lane is None or target_lane.lane_type != carla.LaneType.Driving:
+                continue
+            if not self._lane_is_clear(target_lane, ego_v2v, data_stream):
+                continue
+            plan = self._lane_change_plan(target_lane, direction)
+            if plan:
+                self.agent.set_global_plan(plan, clean_queue=True)
+                self._lane_change_cooldown = 3.0
+            break
 
     def _lane_change_allowed(self, waypoint, direction):
         """
@@ -388,7 +476,7 @@ class V2VControllerCarla:
             return allowed in (carla.LaneChange.Left, carla.LaneChange.Both)
         return allowed in (carla.LaneChange.Right, carla.LaneChange.Both)
 
-    def _plan_has_lane_change(self, road_option):
+    def _lane_plan_has_change(self, road_option):
         """
         Check whether the current local plan already begins with the requested lane-change maneuver.
         Inputs: Desired RoadOption for the lane change direction.
@@ -402,7 +490,7 @@ class V2VControllerCarla:
             return option == RoadOption.CHANGELANELEFT
         return option == RoadOption.CHANGELANERIGHT
 
-    def _lane_clear(self, target_lane, ego_v2v, data_stream):
+    def _lane_is_clear(self, target_lane, ego_v2v, data_stream):
         """
         Check whether the target lane is free of nearby vehicles around the merge point.
         Inputs: Target lane waypoint, ego V2V record, and full V2V data stream.
@@ -410,10 +498,8 @@ class V2VControllerCarla:
         """
         if ego_v2v is None:
             return False
-        for v in data_stream:
-            if v.get("vid") == self.ego_vid:
-                continue
-            other_loc = self._v2v_to_carla_location(ego_v2v, v)
+        for other_v2v in self._v2v_other_records(data_stream):
+            other_loc = self._v2v_to_carla_location(ego_v2v, other_v2v)
             if other_loc is None:
                 continue
             wp = self.map.get_waypoint(other_loc, project_to_road=True, lane_type=carla.LaneType.Driving)
@@ -424,7 +510,7 @@ class V2VControllerCarla:
                     return False
         return True
 
-    def _build_lane_change_plan(self, target_lane, direction, steps=25, step_dist=2.0):
+    def _lane_change_plan(self, target_lane, direction, steps=25, step_dist=2.0):
         """
         Build a short CARLA waypoint plan that performs a lane change and then follows the new lane.
         Inputs: Target lane waypoint, lane-change direction, number of follow-up steps, and step distance.
@@ -442,34 +528,71 @@ class V2VControllerCarla:
             plan.append((wp, RoadOption.LANEFOLLOW))
         return plan
 
-    def _get_path_points(self, count=50):
+    # Path helpers.
+
+    def _path_points(self, count=50):
         """
         Extract a finite set of upcoming path points from the current local planner queue.
         Inputs: Maximum number of points to read from the local plan.
         Outputs: Returns a list of CARLA Locations representing the upcoming path.
         """
         plan = list(self.agent.get_local_planner().get_plan())
-        points = []
-        for wp, _ in plan[:count]:
-            points.append(wp.transform.location)
+        points = [wp.transform.location for wp, _ in plan[:count]]
         if not points:
             points.append(self.vehicle.get_location())
         return points
 
-    def _path_waypoints(self, points):
+    def _path_waypoints(self, path_points):
         """
         Map CARLA locations to driving-lane waypoints along the current path.
         Inputs: A list of CARLA path locations.
         Outputs: Returns the corresponding CARLA waypoint list for valid driving lanes.
         """
         waypoints = []
-        for loc in points:
+        for loc in path_points:
             wp = self.map.get_waypoint(loc, project_to_road=True, lane_type=carla.LaneType.Driving)
             if wp is not None:
                 waypoints.append(wp)
         return waypoints
 
-    def _draw_plan_points(self):
+    def _path_junction_points(self, path_points):
+        """
+        Extract the portion of the ego path that passes through the next junction.
+        Inputs: A list of upcoming CARLA path locations.
+        Outputs: Returns the junction-focused path slice or an empty list.
+        """
+        junction_indices = []
+        for idx, loc in enumerate(path_points):
+            wp = self.map.get_waypoint(loc, project_to_road=True, lane_type=carla.LaneType.Driving)
+            if wp is not None and wp.is_junction:
+                junction_indices.append(idx)
+        if not junction_indices:
+            return []
+        start_idx = max(0, junction_indices[0] - 1)
+        end_idx = min(len(path_points), junction_indices[-1] + 2)
+        return path_points[start_idx:end_idx]
+
+    def _path_distance_to_junction_entry(self, path_points):
+        """
+        Measure path distance from the ego position to the first waypoint that lies inside the next junction.
+        Inputs: A list of upcoming CARLA path locations.
+        Outputs: Returns the path distance in meters, or None if no junction is ahead.
+        """
+        if not path_points:
+            return None
+
+        ego_loc = self.vehicle.get_location()
+        prev_loc = ego_loc
+        distance = 0.0
+        for loc in path_points:
+            distance += prev_loc.distance(loc)
+            wp = self.map.get_waypoint(loc, project_to_road=True, lane_type=carla.LaneType.Driving)
+            if wp is not None and wp.is_junction:
+                return distance
+            prev_loc = loc
+        return None
+
+    def _route_draw_points(self):
         """
         Draw the cached global route points for debugging in the CARLA world.
         Inputs: No additional inputs.
@@ -487,7 +610,80 @@ class V2VControllerCarla:
                 persistent_lines=True,
             )
 
-    def _path_intersection(self, path_points, seg_start, seg_end):
+    # Conflict geometry helpers.
+
+    def _conflict_state(self, ego_v2v, other_v2v, path_points):
+        """
+        Compute the projected crossing state between the ego path and another vehicle motion segment.
+        Inputs: Ego V2V record, another vehicle V2V record, and ego path points.
+        Outputs: Returns a conflict-state dictionary or None if there is no path intersection.
+        """
+        if len(path_points) < 2:
+            return None
+        motion_state = self._other_motion_state(ego_v2v, other_v2v)
+        if motion_state is None:
+            return None
+
+        hit = self._path_first_intersection(
+            path_points,
+            motion_state["other_loc"],
+            motion_state["other_end"],
+        )
+        if hit is None:
+            return None
+
+        ego_dist, other_dist, hit_loc = hit
+        ego_heading = ego_v2v.get("heading", 0.0)
+        ego_loc = self.vehicle.get_location()
+        ego_long, _ = self._geom_project_to_heading(
+            ego_heading,
+            hit_loc.x - ego_loc.x,
+            hit_loc.y - ego_loc.y,
+        )
+        other_long, _ = self._geom_project_to_heading(
+            motion_state["other_heading"],
+            hit_loc.x - motion_state["other_loc"].x,
+            hit_loc.y - motion_state["other_loc"].y,
+        )
+        return {
+            "other_v2v": other_v2v,
+            "other_loc": motion_state["other_loc"],
+            "other_speed": motion_state["other_speed"],
+            "other_heading": motion_state["other_heading"],
+            "other_end": motion_state["other_end"],
+            "projection_dist": motion_state["projection_dist"],
+            "ego_dist": ego_dist,
+            "other_dist": other_dist,
+            "hit_loc": hit_loc,
+            "ego_long": ego_long,
+            "other_long": other_long,
+        }
+
+    def _other_motion_state(self, ego_v2v, other_v2v):
+        """
+        Build a short projected motion segment for another vehicle from its current V2V state.
+        Inputs: Ego V2V record and another vehicle V2V record.
+        Outputs: Returns projected motion information or None if the position is invalid.
+        """
+        other_loc = self._v2v_to_carla_location(ego_v2v, other_v2v)
+        if other_loc is None:
+            return None
+        other_speed = self._v2v_effective_speed(other_v2v)
+        other_heading = other_v2v.get("heading", 0.0)
+        projection_dist = max(
+            other_speed * self.conflict_horizon_s,
+            self.conflict_min_projection_dist,
+        )
+        other_end = self._geom_project_forward(other_loc, other_heading, projection_dist)
+        return {
+            "other_loc": other_loc,
+            "other_speed": other_speed,
+            "other_heading": other_heading,
+            "projection_dist": projection_dist,
+            "other_end": other_end,
+        }
+
+    def _path_first_intersection(self, path_points, seg_start, seg_end):
         """
         Find the first geometric intersection between the ego path polyline and another projected segment.
         Inputs: Ego path points, segment start, and segment end.
@@ -495,7 +691,7 @@ class V2VControllerCarla:
         """
         total = 0.0
         for p0, p1 in zip(path_points[:-1], path_points[1:]):
-            hit = self._segment_intersection(p0, p1, seg_start, seg_end)
+            hit = self._geom_segment_intersection(p0, p1, seg_start, seg_end)
             seg_len = p0.distance(p1)
             if hit is not None:
                 ego_dist = total + p0.distance(hit)
@@ -504,7 +700,7 @@ class V2VControllerCarla:
             total += seg_len
         return None
 
-    def _segment_intersection(self, p0, p1, p2, p3):
+    def _geom_segment_intersection(self, p0, p1, p2, p3):
         """
         Compute the intersection point of two 2D line segments if it exists.
         Inputs: Four CARLA Locations defining two segments.
@@ -523,16 +719,61 @@ class V2VControllerCarla:
             return carla.Location(x=x1 + t * (x2 - x1), y=y1 + t * (y2 - y1), z=0.0)
         return None
 
-    def _speed_for_gap(self, ego_speed, distance):
+    def _geom_project_to_heading(self, heading_deg, dx, dy):
         """
-        Convert a front-vehicle gap into a reduced target speed using headway and minimum-gap rules.
-        Inputs: Ego speed and longitudinal distance to the lead vehicle.
-        Outputs: Returns a target speed in m/s.
+        Project a relative 2D offset into longitudinal and lateral components under a given heading.
+        Inputs: Heading in degrees and a relative dx, dy vector.
+        Outputs: Returns longitudinal and lateral distances in the heading-aligned frame.
         """
-        gap = max(0.1, distance - self.min_gap)
-        return min(self.target_speed_mps, gap / max(0.1, self.time_headway))
+        heading = math.radians(heading_deg)
+        # Verified with current METS-R/BSM headings:
+        # heading 0 deg -> CARLA -y, 90 deg -> CARLA +x,
+        # 180 deg -> CARLA +y, 270 deg -> CARLA -x.
+        forward_x = math.sin(heading)
+        forward_y = -math.cos(heading)
+        right_x = math.cos(heading)
+        right_y = math.sin(heading)
+        longitudinal = dx * forward_x + dy * forward_y
+        lateral = dx * right_x + dy * right_y
+        return longitudinal, lateral
 
-    def _relative_xy(self, ego_v2v, other_v2v):
+    def _geom_project_forward(self, origin, heading_deg, distance):
+        """
+        Project a CARLA location forward along a heading by a given distance.
+        Inputs: Origin location, heading in degrees, and travel distance.
+        Outputs: Returns the forward-projected CARLA Location.
+        """
+        heading = math.radians(heading_deg)
+        # Same verified heading convention as _geom_project_to_heading():
+        # 0 deg -> -y, 90 deg -> +x, 180 deg -> +y, 270 deg -> -x.
+        dx = math.sin(heading) * distance
+        dy = -math.cos(heading) * distance
+        return carla.Location(x=origin.x + dx, y=origin.y + dy, z=origin.z)
+
+    # V2V coordinate helpers.
+
+    def _v2v_ego_record(self, data_stream):
+        """
+        Find the ego vehicle record in the current V2V data stream.
+        Inputs: A list of V2V message dictionaries.
+        Outputs: Returns the ego V2V dictionary or None if it is missing.
+        """
+        for v2v_record in data_stream:
+            if v2v_record.get("vid") == self.ego_vid:
+                return v2v_record
+        return None
+
+    def _v2v_other_records(self, data_stream):
+        """
+        Iterate over all non-ego V2V records in the current stream.
+        Inputs: A list of V2V message dictionaries.
+        Outputs: Yields one non-ego V2V record at a time.
+        """
+        for v2v_record in data_stream:
+            if v2v_record.get("vid") != self.ego_vid:
+                yield v2v_record
+
+    def _v2v_relative_xy(self, ego_v2v, other_v2v):
         """
         Compute the relative 2D position of another vehicle with respect to the ego from V2V data.
         Inputs: Ego V2V record and another vehicle's V2V record.
@@ -546,9 +787,9 @@ class V2VControllerCarla:
             if None in (ex, ey, ox, oy):
                 return 0.0, 0.0
             return ox - ex, oy - ey
-        return self._latlon_delta(ego_v2v, other_v2v)
+        return self._v2v_latlon_delta(ego_v2v, other_v2v)
 
-    def _latlon_delta(self, ego_v2v, other_v2v):
+    def _v2v_latlon_delta(self, ego_v2v, other_v2v):
         """
         Convert two geodetic V2V positions into an approximate local Cartesian offset.
         Inputs: Ego V2V record and another vehicle's V2V record with latitude/longitude.
@@ -561,8 +802,13 @@ class V2VControllerCarla:
         if None in (lat1, lon1, lat2, lon2):
             return 0.0, 0.0
         r = 6371000.0
-        dx = math.radians(lon2 - lon1) * math.cos(math.radians((lat1 + lat2) / 2.0)) * r
-        dy = math.radians(lat2 - lat1) * r
+        east = math.radians(lon2 - lon1) * math.cos(math.radians((lat1 + lat2) / 2.0)) * r
+        north = math.radians(lat2 - lat1) * r
+        # Verified against CARLA ground truth in the current Town05 co-sim setup:
+        # northward motion in BSM lat/lon aligns with CARLA +x,
+        # eastward motion in BSM lat/lon aligns with CARLA -y.
+        dx = north
+        dy = -east
         return dx, dy
 
     def _v2v_to_carla_location(self, ego_v2v, other_v2v):
@@ -577,35 +823,21 @@ class V2VControllerCarla:
             if x is None or y is None:
                 return None
             return carla.Location(x=x, y=-y, z=0.0)
-        dx, dy = self._relative_xy(ego_v2v, other_v2v)
+        dx, dy = self._v2v_relative_xy(ego_v2v, other_v2v)
         ego_loc = self.vehicle.get_location()
         return carla.Location(x=ego_loc.x + dx, y=ego_loc.y + dy, z=0.0)
 
-    def _project_to_heading(self, heading_deg, dx, dy):
+    def _v2v_effective_speed(self, other_v2v):
         """
-        Project a relative 2D offset into longitudinal and lateral components under a given heading.
-        Inputs: Heading in degrees and a relative dx, dy vector.
-        Outputs: Returns longitudinal and lateral distances in the heading-aligned frame.
+        Build a non-zero speed estimate for projected V2V motion even when reported velocity is missing.
+        Inputs: Another vehicle's V2V record.
+        Outputs: Returns the effective speed used by conflict and junction checks.
         """
-        heading = math.radians(heading_deg)
-        forward_x = math.sin(heading)
-        forward_y = math.cos(heading)
-        right_x = math.cos(heading)
-        right_y = -math.sin(heading)
-        longitudinal = dx * forward_x + dy * forward_y
-        lateral = dx * right_x + dy * right_y
-        return longitudinal, lateral
+        reported_speed = max(0.0, other_v2v.get("velocity", 0.0))
+        min_speed = self.conflict_min_projection_dist / max(0.1, self.conflict_horizon_s)
+        return max(reported_speed, min_speed)
 
-    def _project_forward(self, origin, heading_deg, distance):
-        """
-        Project a CARLA location forward along a heading by a given distance.
-        Inputs: Origin location, heading in degrees, and travel distance.
-        Outputs: Returns the forward-projected CARLA Location.
-        """
-        heading = math.radians(heading_deg)
-        dx = math.sin(heading) * distance
-        dy = math.cos(heading) * distance
-        return carla.Location(x=origin.x + dx, y=origin.y + dy, z=origin.z)
+    # Small utilities.
 
     def _metsr_to_carla_location(self, x, y):
         """
