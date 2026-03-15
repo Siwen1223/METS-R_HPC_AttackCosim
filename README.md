@@ -9,6 +9,7 @@ This repository now includes enhanced CARLA visualization functionality that all
 - **Automatically synchronize** vehicle positions between METS-R simulation and CARLA
 - **Manage vehicle lifecycle** (spawning, updating, cleanup) automatically
 
+
 ### Quick Start with CARLA Visualization
 
 ```bash
@@ -21,5 +22,13 @@ python cosim_example.py --carla_viz --carla_map Town02 --carla_port 2001
 # Run the dedicated example script
 python carla_viz_example.py
 ```
+
+## New: CARLA-METS-R Co-simulation Features and Functionalities：
+
+- Vehicles inside the co-simulation region are planned and controlled by CARLA at a finer granularity
+- V2V information is integrated into the planner and controller, so attacks directly affect vehicle planning and control
+- Vehicle-side sensor data collection and saving, and attack-oriented dataset construction
+
+Attack scenarios under co-simulation are located in `examples/BSM_attack`.
 
 For detailed documentation, see [CARLA_VISUALIZATION_README.md](CARLA_VISUALIZATION_README.md).
