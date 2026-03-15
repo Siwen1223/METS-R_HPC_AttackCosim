@@ -31,10 +31,10 @@ class CosimPathPlanner:
         self.lane_waypoints = []
         self.missing_edges = []
 
-    def build_coarse_points(self, route_ids):
+    def build_coarse_points(self, route_ids, sampling_locs=(0.2, 0.5)):
         """
         Build laterally offset coarse path points by sampling each road in a METS-R route.
-        Inputs: A sequence of METS-R road IDs.
+        Inputs: A sequence of METS-R road IDs; The proportion of the sampling point position to the road length.
         Outputs: Returns coarse_points_metsr and updates coarse_points_carla and missing_edges.
         """
         self.coarse_points_metsr = []
@@ -51,7 +51,7 @@ class CosimPathPlanner:
             if not points:
                 self.missing_edges.append(road_id)
                 continue
-            for frac in (0.2, 0.5):
+            for frac in sampling_locs:
                 p0, p1 = self._point_at_fraction(points, frac)
                 if p0 is None or p1 is None:
                     self.missing_edges.append(road_id)

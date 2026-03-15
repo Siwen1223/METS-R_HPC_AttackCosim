@@ -329,7 +329,7 @@ if __name__ == "__main__":
         route_synced[vid] = False
 
     try:
-        for i in range(6000):
+        for i in range(300):
             for vid in controller_vids:
                 init_controller_for_vid(vid)
 

@@ -24,7 +24,8 @@ from cosim_utils.v2v_controller_carla import V2VControllerCarla
 
 import subprocess
 import signal
-from carla import TrafficLightState
+
+#from carla import TrafficLightState
 
 
 def is_port_open(port, host="127.0.0.1", timeout=0.5):
@@ -73,76 +74,6 @@ def kill_process_on_port(port=8000):
         print(f"Error killing process on port {port}:", e)
 
 
-def load_sumo_net(net_path):
-    tree = ET.parse(net_path)
-    root = tree.getroot()
-    location = root.find("location")
-    net_offset = (0.0, 0.0)
-    if location is not None:
-        offset_str = location.get("netOffset", "0,0")
-        parts = offset_str.split(",")
-        if len(parts) >= 2:
-            net_offset = (float(parts[0]), float(parts[1]))
-    nodes = {}
-    for node in root.findall("node"):
-        node_id = node.get("id")
-        if node_id is None:
-            continue
-        nodes[node_id] = (float(node.get("x", "0")), float(node.get("y", "0")))
-    edges = {}
-    for edge in root.findall("edge"):
-        edge_id = edge.get("id")
-        if edge_id is None:
-            continue
-        edges[edge_id] = edge
-    return nodes, edges, net_offset
-
-
-def edge_shape_points(edge, nodes):
-    shape = edge.get("shape")
-    if shape:
-        points = []
-        for pair in shape.strip().split(" "):
-            parts = pair.split(",")
-            if len(parts) < 2:
-                continue
-            x_str, y_str = parts[0], parts[1]
-            points.append((float(x_str), float(y_str)))
-        return points
-    from_id = edge.get("from")
-    to_id = edge.get("to")
-    if from_id in nodes and to_id in nodes:
-        return [nodes[from_id], nodes[to_id]]
-    return []
-
-
-def sample_polyline(points, step):
-    if len(points) < 2:
-        return points
-    sampled = [points[0]]
-    for (x0, y0), (x1, y1) in zip(points[:-1], points[1:]):
-        dx = x1 - x0
-        dy = y1 - y0
-        seg_len = (dx * dx + dy * dy) ** 0.5
-        if seg_len == 0:
-            continue
-        num = max(1, int(seg_len // step))
-        for i in range(1, num + 1):
-            t = min(1.0, i * step / seg_len)
-            sampled.append((x0 + t * dx, y0 + t * dy))
-    return sampled
-
-
-def build_route_coords(route_ids, edges, nodes, net_offset, step=5.0):
-    coords = []
-    for road_id in route_ids:
-        edge = edges.get(str(road_id))
-        if edge is None:
-            continue
-        points = edge_shape_points(edge, nodes)
-        for x, y in sample_polyline(points, step):
-            coords.append((x - net_offset[0], y - net_offset[1]))
-    return coords
 
 if __name__ == '__main__':
     force_restart = True
@@ -240,16 +171,12 @@ if __name__ == '__main__':
         )
         controllers[vid] = controller
         route_synced[vid] = False
+    for vid in controller_vids:
+        init_controller_for_vid(vid)
 
-
-
-    # 采集数据、视频
 
     try:
         for i in range(6000):
-            for vid in controller_vids:
-                init_controller_for_vid(vid)
-
             for vid, controller in controllers.items():
                 if not route_synced.get(vid, False) and cosim_client.carla_entered.get(vid, False):
                     route_ids = cosim_client.carla_route.get(vid, [])
