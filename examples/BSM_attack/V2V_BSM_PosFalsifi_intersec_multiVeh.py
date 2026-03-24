@@ -14,17 +14,15 @@ if str(ROOT_DIR) not in sys.path:
 import os
 import time
 import socket
-import xml.etree.ElementTree as ET
-
-import carla
 
 from utils.util import read_run_config, prepare_sim_dirs, run_simulation_in_docker
 from utils.carla_util import open_carla
 from clients.CoSimClient import CoSimClient
 from clients.KafkaDataProcessor import KafkaDataProcessor
 from clients.KafkaDataSender import KafkaDataSender
-from cosim_utils.run_data_saver import RunDataSaver
+# from cosim_utils.run_data_saver import RunDataSaver
 from cosim_utils.v2v_controller_carla import V2VControllerCarla
+from tools.derive_carla_roads_from_metsr import derive_carla_road_from_metsr
 
 import subprocess
 import signal
@@ -71,140 +69,6 @@ def kill_process_on_port(port=8000):
             print(f"No process is using port {port}")
     except Exception as e:
         print(f"Error killing process on port {port}:", e)
-
-
-def load_sumo_net(net_path: Path):
-    tree = ET.parse(net_path)
-    root = tree.getroot()
-    location = root.find("location")
-    net_offset = (0.0, 0.0)
-    if location is not None:
-        offset_str = location.get("netOffset", "0,0")
-        parts = offset_str.split(",")
-        if len(parts) >= 2:
-            net_offset = (float(parts[0]), float(parts[1]))
-    nodes = {}
-    for node in root.findall("node"):
-        node_id = node.get("id")
-        if node_id is None:
-            continue
-        nodes[node_id] = (float(node.get("x", "0")), float(node.get("y", "0")))
-    edges = {}
-    for edge in root.findall("edge"):
-        edge_id = edge.get("id")
-        if edge_id is None:
-            continue
-        edges[edge_id] = edge
-    return nodes, edges, net_offset
-
-
-def edge_shape_points(edge, nodes):
-    shape = edge.get("shape")
-    if shape:
-        points = []
-        for pair in shape.strip().split(" "):
-            parts = pair.split(",")
-            if len(parts) < 2:
-                continue
-            points.append((float(parts[0]), float(parts[1])))
-        return points
-    from_id = edge.get("from")
-    to_id = edge.get("to")
-    if from_id in nodes and to_id in nodes:
-        return [nodes[from_id], nodes[to_id]]
-    return []
-
-
-def sample_polyline(points, step):
-    if len(points) < 2:
-        return points
-    sampled = [points[0]]
-    for (x0, y0), (x1, y1) in zip(points[:-1], points[1:]):
-        dx = x1 - x0
-        dy = y1 - y0
-        seg_len = (dx * dx + dy * dy) ** 0.5
-        if seg_len == 0:
-            continue
-        num = max(1, int(seg_len // step))
-        for i in range(1, num + 1):
-            t = min(1.0, i * step / seg_len)
-            sampled.append((x0 + t * dx, y0 + t * dy))
-    return sampled
-
-
-def derive_carla_roads(carla_world, network_file, metsr_roads, sample_step=5.0, coverage_threshold=5.0, carla_step=2.0):
-    net_path = (ROOT_DIR / network_file).resolve()
-    nodes, edges, net_offset = load_sumo_net(net_path)
-    carla_map = carla_world.get_map()
-
-    def transform_point(x, y, mode):
-        if mode == "flip":
-            return x, -y
-        if mode == "flip+add":
-            return x + net_offset[0], -(y + net_offset[1])
-        if mode == "flip+sub":
-            return x - net_offset[0], -(y - net_offset[1])
-        raise ValueError(mode)
-
-    def eval_transform(mode):
-        distances = []
-        for road_id in metsr_roads:
-            edge = edges.get(road_id)
-            if edge is None:
-                continue
-            points = edge_shape_points(edge, nodes)
-            for x, y in sample_polyline(points, sample_step):
-                tx, ty = transform_point(x, y, mode)
-                loc = carla.Location(x=tx, y=ty, z=0.0)
-                wp = carla_map.get_waypoint(loc, project_to_road=True, lane_type=carla.LaneType.Driving)
-                distances.append(loc.distance(wp.transform.location))
-        return sum(distances) / max(1, len(distances))
-
-    best_mode = min(["flip", "flip+add", "flip+sub"], key=eval_transform)
-
-    sumo_points = []
-    for road_id in metsr_roads:
-        edge = edges.get(road_id)
-        if edge is None:
-            continue
-        points = edge_shape_points(edge, nodes)
-        for x, y in sample_polyline(points, sample_step):
-            tx, ty = transform_point(x, y, best_mode)
-            sumo_points.append((tx, ty))
-
-    threshold_sq = coverage_threshold * coverage_threshold
-    road_ids = set()
-
-    def sample_carla_segment_points(wp_start, wp_end, step):
-        pts = []
-        wp = wp_start
-        end_loc = wp_end.transform.location
-        for _ in range(2000):
-            loc = wp.transform.location
-            pts.append((loc.x, loc.y))
-            if loc.distance(end_loc) < step * 1.5:
-                pts.append((end_loc.x, end_loc.y))
-                break
-            nxt = wp.next(step)
-            if not nxt:
-                break
-            wp = nxt[0]
-            if wp.road_id != wp_start.road_id or wp.lane_id != wp_start.lane_id:
-                break
-        return pts
-
-    for wp_start, wp_end in carla_map.get_topology():
-        pts = sample_carla_segment_points(wp_start, wp_end, carla_step)
-        keep = False
-        for px, py in pts:
-            min_d2 = min((px - sx) ** 2 + (py - sy) ** 2 for sx, sy in sumo_points)
-            if min_d2 <= threshold_sq:
-                keep = True
-                break
-        if keep:
-            road_ids.add(wp_start.road_id)
-
-    return sorted(road_ids), best_mode
 
 
 def print_controller_debug(tick, controllers, cosim_client, min_pair_distance=8.0):
@@ -279,16 +143,12 @@ if __name__ == "__main__":
     carla_client, carla_tm = open_carla(config)
     print("CARLA server started successfully")
 
-    carla_roads, transform_mode = derive_carla_roads(
-        carla_client.get_world(),
-        config.network_file,
-        metsr_roads,
-        sample_step=5.0,
-        coverage_threshold=5.0,
-        carla_step=2.0,
+    carla_roads = derive_carla_road_from_metsr(
+        metsr_road_ids=metsr_roads,
+        config_path="configs/run_cosim_CARLAT5.json",
     )
     config.carla_road = carla_roads
-    print(f"Derived carla_road with transform={transform_mode}: {config.carla_road}")
+    print(f"Derived carla_road from XML: {config.carla_road}")
 
     metsr_port = config.metsr_port[0] if hasattr(config, "metsr_port") else 4000
     metsr_reused = is_port_open(metsr_port)
@@ -346,9 +206,9 @@ if __name__ == "__main__":
     }]]
 
     controller_vids = [1, 2, 3, 4]
-    vehicle_with_sensors = list(controller_vids)
-    for vid in vehicle_with_sensors:
-        cosim_client.enable_vehicle_sensor(vid)
+    # vehicle_with_sensors = list(controller_vids)
+    # for vid in vehicle_with_sensors:
+    #     cosim_client.enable_vehicle_sensor(vid)
 
     controllers = {}
     route_synced = {}
@@ -359,29 +219,29 @@ if __name__ == "__main__":
     debug_pair_distance = 10.0
     max_steps = 300
 
-    dataset_root = ROOT_DIR / "V2X-Attack-Dataset"
-    attack_info = {
-        "attack_type": "BSM_replay",
-        "attack_enabled": True,
-        "start_time": 0.0,
-        "end_time": 200 * dt,
-        "parameters": {
-            "fake_vehicle_id": 0,
-        },
-    }
-    meta_info = {
-        "scenario": "V2V_BSM_PosFalsifi_intersec_multiVeh",
-        "map": getattr(config, "carla_map", None),
-        "random_seed": config.random_seeds[0] if getattr(config, "random_seeds", None) else None,
-        "sim_step_size": dt,
-        "sim_fps": 1.0 / dt if dt else None,
-        "max_steps": max_steps,
-        "planned_duration_sec": max_steps * dt,
-        "vehicle_ids": controller_vids,
-        "sensor_vehicle_ids": vehicle_with_sensors,
-    }
-    data_saver = RunDataSaver(dataset_root, meta_info, attack_info, sensor_every_n=5)
-    data_saver.log_event(0.0, "Simulation started")
+    # dataset_root = ROOT_DIR / "V2X-Attack-Dataset"
+    # attack_info = {
+    #     "attack_type": "BSM_replay",
+    #     "attack_enabled": True,
+    #     "start_time": 0.0,
+    #     "end_time": 200 * dt,
+    #     "parameters": {
+    #         "fake_vehicle_id": 0,
+    #     },
+    # }
+    # meta_info = {
+    #     "scenario": "V2V_BSM_PosFalsifi_intersec_multiVeh",
+    #     "map": getattr(config, "carla_map", None),
+    #     "random_seed": config.random_seeds[0] if getattr(config, "random_seeds", None) else None,
+    #     "sim_step_size": dt,
+    #     "sim_fps": 1.0 / dt if dt else None,
+    #     "max_steps": max_steps,
+    #     "planned_duration_sec": max_steps * dt,
+    #     "vehicle_ids": controller_vids,
+    #     "sensor_vehicle_ids": vehicle_with_sensors,
+    # }
+    # data_saver = RunDataSaver(dataset_root, meta_info, attack_info, sensor_every_n=5)
+    # data_saver.log_event(0.0, "Simulation started")
 
     def init_controller_for_vid(vid):
         if vid in controllers:
@@ -421,7 +281,7 @@ if __name__ == "__main__":
                     continue
                 control = controller.run_step(last_stream, dt=dt)
                 carla_vehicle.apply_control(control)
-                data_saver.record_control(i, sim_time, vid, control)
+                # data_saver.record_control(i, sim_time, vid, control)
 
             # Same attack pattern as single-intersection demo.
             if i <= 200:
@@ -454,17 +314,17 @@ if __name__ == "__main__":
             for vid in done_vids:
                 controllers.pop(vid, None)
                 route_synced.pop(vid, None)
-                data_saver.log_event(sim_time, f"Vehicle {vid} finished route")
+                # data_saver.log_event(sim_time, f"Vehicle {vid} finished route")
 
-            if i % data_saver.sensor_every_n == 0:
-                data_saver.save_sensors(cosim_client)
+            # if i % data_saver.sensor_every_n == 0:
+            #     data_saver.save_sensors(cosim_client)
 
-            data_saver.record_vehicle_state(i, sim_time, cosim_client)
+            # data_saver.record_vehicle_state(i, sim_time, cosim_client)
 
             data_stream = kafkaDataProcessor.process()
             if data_stream is not None:
                 last_stream = data_stream
-                data_saver.record_bsm(i, sim_time, data_stream)
+                # data_saver.record_bsm(i, sim_time, data_stream)
             if i % debug_every_n == 0:
                 print_controller_debug(i, controllers, cosim_client, min_pair_distance=debug_pair_distance)
             time.sleep(0.08)
@@ -472,8 +332,9 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\nSimulation interrupted by user")
     finally:
-        data_saver.log_event(sim_time, "Simulation ended")
-        data_saver.finalize(duration_sec=sim_time)
+        # data_saver.log_event(sim_time, "Simulation ended")
+        # data_saver.finalize(duration_sec=sim_time)
+        pass
 
     cosim_client.metsr.terminate()
     os.chdir("docker")

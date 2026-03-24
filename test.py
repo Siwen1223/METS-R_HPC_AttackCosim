@@ -35,7 +35,7 @@ def draw_town05_road_ids(host="localhost", port=2000, town="Town05", step=2.0, s
     client = carla.Client(host, port)
     client.set_timeout(20.0)
 
-    # 1) 切换到 Town05（这一步就是你指出我之前缺的）
+    # 1) 切换到 Town05
     world = client.load_world(town)
     carla_map = world.get_map()
 

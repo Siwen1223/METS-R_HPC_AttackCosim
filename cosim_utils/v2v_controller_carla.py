@@ -31,7 +31,7 @@ class V2VControllerCarla:
         conflict_time_safe=3.0,
         conflict_ignore_dist=2.0,
         conflict_max_dist=40.0,
-        conflict_min_projection_dist=20.0,
+        conflict_min_projection_dist=4.0,
         junction_yield_radius=12.0,
         junction_stop_buffer=3.0,
         lane_change_lookahead_s=4.0,
@@ -311,7 +311,7 @@ class V2VControllerCarla:
                 continue
 
             ego_time = ego_dist / max(0.1, ego_speed)
-            other_time = other_dist / conflict_state["other_speed"]
+            other_time = other_dist / max(0.01, conflict_state["other_speed"])
             # Drop cases where the other vehicle is clearly going to clear the conflict long before ego arrives.
             if other_time < ego_time - self.conflict_time_safe:
                 continue
@@ -668,7 +668,8 @@ class V2VControllerCarla:
         other_loc = self._v2v_to_carla_location(ego_v2v, other_v2v)
         if other_loc is None:
             return None
-        other_speed = self._v2v_effective_speed(other_v2v)
+        #other_speed = self._v2v_effective_speed(other_v2v)
+        other_speed = max(0.0, other_v2v.get("velocity", 0.0))
         other_heading = other_v2v.get("heading", 0.0)
         projection_dist = max(
             other_speed * self.conflict_horizon_s,

@@ -1,253 +1,65 @@
-import argparse
-import sys
 from pathlib import Path
+import sys
 import xml.etree.ElementTree as ET
 
-import carla
-
 ROOT_DIR = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT_DIR))
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 from utils.util import read_run_config
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(
-        description="Derive CARLA road_id list from METS-R/SUMO edge IDs."
-    )
-    parser.add_argument(
-        "-c",
-        "--config",
-        default="configs/run_cosim_CARLAT5.json",
-        help="Run config JSON (for network_file and CARLA host/port).",
-    )
-    parser.add_argument(
-        "-r",
-        "--metsr-roads",
-        required=True,
-        help="Comma-separated SUMO edge IDs, e.g. -39,39,0,-0,-18,40,-41,41",
-    )
-    parser.add_argument(
-        "--sample-step",
-        type=float,
-        default=5.0,
-        help="Sample interval in meters along each edge polyline.",
-    )
-    parser.add_argument(
-        "--method",
-        choices=["projection", "coverage"],
-        default="coverage",
-        help="Mapping method: projection (nearest road) or coverage (road segments near SUMO polyline).",
-    )
-    parser.add_argument(
-        "--coverage-threshold",
-        type=float,
-        default=5.0,
-        help="Distance threshold in meters for coverage method.",
-    )
-    parser.add_argument(
-        "--carla-step",
-        type=float,
-        default=2.0,
-        help="Sampling step along CARLA topology segments for coverage method.",
-    )
-    parser.add_argument(
-        "--transform",
-        choices=["auto", "flip", "flip+add", "flip+sub"],
-        default="auto",
-        help="Coordinate transform: flip=(x, -y), add/sub uses netOffset with flip.",
-    )
-    return parser.parse_args()
+def _orig_roads_from_value(value):
+    roads = set()
+    for token in value.split():
+        road_id = token.split("_", 1)[0]
+        if road_id:
+            roads.add(int(road_id))
+    return roads
 
 
-def load_sumo_net(net_path: Path):
-    tree = ET.parse(net_path)
-    root = tree.getroot()
-    location = root.find("location")
-    net_offset = (0.0, 0.0)
-    if location is not None:
-        offset_str = location.get("netOffset", "0,0")
-        parts = offset_str.split(",")
-        if len(parts) >= 2:
-            net_offset = (float(parts[0]), float(parts[1]))
-    nodes = {}
-    for node in root.findall("node"):
-        node_id = node.get("id")
-        if node_id is None:
-            continue
-        nodes[node_id] = (float(node.get("x", "0")), float(node.get("y", "0")))
-    edges = {}
-    for edge in root.findall("edge"):
-        edge_id = edge.get("id")
-        if edge_id is None:
-            continue
-        edges[edge_id] = edge
-    return nodes, edges, net_offset
-
-
-def edge_shape_points(edge, nodes):
-    shape = edge.get("shape")
-    if shape:
-        points = []
-        for pair in shape.strip().split(" "):
-            parts = pair.split(",")
-            if len(parts) < 2:
-                continue
-            x_str, y_str = parts[0], parts[1]
-            points.append((float(x_str), float(y_str)))
-        return points
-    from_id = edge.get("from")
-    to_id = edge.get("to")
-    if from_id in nodes and to_id in nodes:
-        return [nodes[from_id], nodes[to_id]]
-    return []
-
-
-def sample_polyline(points, step):
-    if len(points) < 2:
-        return points
-    sampled = [points[0]]
-    for (x0, y0), (x1, y1) in zip(points[:-1], points[1:]):
-        dx = x1 - x0
-        dy = y1 - y0
-        seg_len = (dx * dx + dy * dy) ** 0.5
-        if seg_len == 0:
-            continue
-        num = max(1, int(seg_len // step))
-        for i in range(1, num + 1):
-            t = min(1.0, i * step / seg_len)
-            sampled.append((x0 + t * dx, y0 + t * dy))
-    return sampled
-
-
-def main():
-    args = parse_args()
-    config = read_run_config(args.config)
+def derive_carla_road_from_metsr(metsr_road_ids, config_path):
+    """
+    Derive the CARLA road_id list corresponding to a set of METS-R road IDs.
+    It reads the SUMO/METS-R network XML from the run config, collects road IDs
+    referenced by lane origId fields on the selected edges, and also collects
+    connector road IDs from connection origId fields between every selected road pair.
+    """
+    config = read_run_config(config_path)
     net_path = (ROOT_DIR / config.network_file).resolve()
-    if not net_path.exists():
-        print(f"ERROR: network_file not found: {net_path}")
-        sys.exit(1)
+    root = ET.parse(net_path).getroot()
 
-    nodes, edges, net_offset = load_sumo_net(net_path)
-    metsr_roads = [r.strip() for r in args.metsr_roads.split(",") if r.strip()]
+    metsr_road_ids = [str(road_id) for road_id in metsr_road_ids]
+    metsr_road_set = set(metsr_road_ids)
 
-    client = carla.Client(config.carla_host, config.carla_port)
-    client.set_timeout(10.0)
-    if getattr(config, "carla_map", None):
-        world = client.load_world(config.carla_map)
-    else:
-        world = client.get_world()
-    carla_map = world.get_map()
+    edges = {edge.get("id"): edge for edge in root.findall("edge") if edge.get("id") is not None}
+    carla_roads = set()
 
-    def transform_point(x, y, mode):
-        if mode == "flip":
-            return x, -y
-        if mode == "flip+add":
-            return x + net_offset[0], -(y + net_offset[1])
-        if mode == "flip+sub":
-            return x - net_offset[0], -(y - net_offset[1])
-        raise ValueError(f"Unknown transform mode: {mode}")
-
-    def eval_transform(mode):
-        road_ids = set()
-        distances = []
-        missing_edges = []
-        for road_id in metsr_roads:
-            edge = edges.get(road_id)
-            if edge is None:
-                missing_edges.append(road_id)
-                continue
-            points = edge_shape_points(edge, nodes)
-            for x, y in sample_polyline(points, args.sample_step):
-                tx, ty = transform_point(x, y, mode)
-                location = carla.Location(x=tx, y=ty, z=0.0)
-                waypoint = carla_map.get_waypoint(
-                    location,
-                    project_to_road=True,
-                    lane_type=carla.LaneType.Driving,
-                )
-                road_ids.add(waypoint.road_id)
-                distances.append(location.distance(waypoint.transform.location))
-        avg_dist = sum(distances) / max(1, len(distances))
-        max_dist = max(distances) if distances else 0.0
-        return road_ids, missing_edges, avg_dist, max_dist
-
-    modes = ["flip", "flip+add", "flip+sub"] if args.transform == "auto" else [args.transform]
-    results = {}
-    for mode in modes:
-        results[mode] = eval_transform(mode)
-
-    if args.transform == "auto":
-        best_mode = min(results.items(), key=lambda item: item[1][2])[0]
-    else:
-        best_mode = args.transform
-
-    road_ids, missing_edges, avg_dist, max_dist = results[best_mode]
-
-    if missing_edges:
-        print(f"WARNING: edges not found in SUMO net: {missing_edges}")
-
-    sumo_points = []
-    for road_id in metsr_roads:
+    for road_id in metsr_road_ids:
         edge = edges.get(road_id)
         if edge is None:
             continue
-        points = edge_shape_points(edge, nodes)
-        for x, y in sample_polyline(points, args.sample_step):
-            tx, ty = transform_point(x, y, best_mode)
-            sumo_points.append((tx, ty))
+        for lane in edge.findall("lane"):
+            for param in lane.findall("param"):
+                if param.get("key") == "origId" and param.get("value"):
+                    carla_roads.update(_orig_roads_from_value(param.get("value")))
 
-    if args.method == "projection":
-        final_ids = road_ids
-        dist_info = (avg_dist, max_dist)
-    else:
-        threshold_sq = args.coverage_threshold ** 2
+    for connection in root.findall("connection"):
+        from_road = connection.get("from")
+        to_road = connection.get("to")
+        if from_road not in metsr_road_set or to_road not in metsr_road_set:
+            continue
+        for param in connection.findall("param"):
+            if param.get("key") == "origId" and param.get("value"):
+                carla_roads.update(_orig_roads_from_value(param.get("value")))
 
-        def sample_carla_segment_points(wp_start, wp_end, step):
-            pts = []
-            wp = wp_start
-            end_loc = wp_end.transform.location
-            for _ in range(2000):
-                loc = wp.transform.location
-                pts.append((loc.x, loc.y))
-                if loc.distance(end_loc) < step * 1.5:
-                    pts.append((end_loc.x, end_loc.y))
-                    break
-                nxt = wp.next(step)
-                if not nxt:
-                    break
-                wp = nxt[0]
-                if wp.road_id != wp_start.road_id or wp.lane_id != wp_start.lane_id:
-                    break
-            return pts
-
-        final_ids = set()
-        dist_samples = []
-        for wp_start, wp_end in carla_map.get_topology():
-            pts = sample_carla_segment_points(wp_start, wp_end, args.carla_step)
-            keep = False
-            for px, py in pts:
-                min_d2 = min((px - sx) ** 2 + (py - sy) ** 2 for sx, sy in sumo_points)
-                dist_samples.append(min_d2 ** 0.5)
-                if min_d2 <= threshold_sq:
-                    keep = True
-            if keep:
-                final_ids.add(wp_start.road_id)
-        avg_cov = sum(dist_samples) / max(1, len(dist_samples))
-        max_cov = max(dist_samples) if dist_samples else 0.0
-        dist_info = (avg_cov, max_cov)
-
-    road_list = sorted(final_ids)
-    print(f"Selected transform: {best_mode}")
-    if args.method == "projection":
-        print(f"Average projection distance: {dist_info[0]:.2f} m (max {dist_info[1]:.2f} m)")
-    else:
-        print(f"Average coverage distance: {dist_info[0]:.2f} m (max {dist_info[1]:.2f} m)")
-    print("Derived carla_road list:")
-    print(road_list)
-    print("\nPython snippet:")
-    print(f"config.carla_road = {road_list}")
+    return sorted(carla_roads)
 
 
 if __name__ == "__main__":
-    main()
+    metsr_roads = ["-0", "-1", "0", "1", "-18", "40", "17", "-47"]
+    carla_roads = derive_carla_road_from_metsr(
+        metsr_road_ids=metsr_roads,
+        config_path="configs/run_cosim_CARLAT5.json",
+    )
+    print(carla_roads)
