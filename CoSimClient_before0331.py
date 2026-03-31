@@ -40,15 +40,15 @@ class CoSimClient(object):
                   self.metsr.set_cosim_road(road)
 
             self.carla_vehs = {} # id of agent and vehicle instance in carla
-            self.carla_coordMaps = {} # legacy metadata kept for compatibility with existing scripts
+            self.carla_coordMaps = {} # id of agent and the corresponding carla coord map
             self.carla_route = {}
             self.carla_destRoad = {}
-            self.carla_entered = {} # legacy state bit; ownership now comes from query_coSimVehicle()
+            self.carla_entered = {}
             self.carla_private_flags = {}
 
-            self.displayOnly_vehs = {} # id of agent and vehicle controlled by METSR, only used for display all vehicles
+            self.other_vehs = {} # id of agent and vehicle controlled by METSR, only used for display all vehicles
 
-            self.carla_waiting_vehs = [] # legacy waiting list kept for compatibility
+            self.carla_waiting_vehs = [] # vehicles waiting to enter the other road, should be visited in every 10 ticks
             self.waypoints = self.carla.get_map().generate_waypoints(2.0) # generate all waypoints at 2-meter intervals
 
             self.carla_veh_sensors = {} # id of vehicle agents : sensor : sensor instances in CARLA belonging to this vehicle
@@ -106,61 +106,61 @@ class CoSimClient(object):
             return road_id in self.config.carla_road
             
       def step(self):
-            """
-            Advance both simulators and reconcile vehicle ownership.
-
-            Ownership is determined only by METS-R query_coSimVehicle():
-            - not managed yet: appears in the ownership set, so spawn a CARLA actor
-            - managed by CARLA: stays in the ownership set, so only sync state back
-            - left co-sim: disappears from the ownership set, so hand control back to METS-R
-            """
             self.carla.tick()
             self.metsr.tick()
 
             cosim_vehs = self.metsr.query_coSimVehicle()['DATA']
+
             cosim_ids = [v['ID'] for v in cosim_vehs]
-            cosim_private_flags = [v['v_type'] for v in cosim_vehs]
-            cosim_info_map = {}
-            cosim_meta_map = {}
-            if cosim_ids:
-                  all_data = self.metsr.query_vehicle(cosim_ids, cosim_private_flags, transform_coords=True)['DATA']
-                  for cosim_id, cosim_veh, private_flag, veh_info in zip(cosim_ids, cosim_vehs, cosim_private_flags, all_data):
-                        cosim_meta_map[cosim_id] = cosim_veh
-                        cosim_info_map[cosim_id] = (private_flag, veh_info)
+            private_flags = [v['v_type'] for v in cosim_vehs]
+            all_data = self.metsr.query_vehicle(cosim_ids, private_flags, transform_coords=True)['DATA']
+            # Update co-sim vehicles in CARLA
 
-            current_cosim_ids = set(cosim_ids)
-            managed_ids = set(self.carla_vehs.keys())
-
-            # State 1: the vehicle left the co-sim ownership set and should no longer be CARLA-managed.
-            for vid in managed_ids - current_cosim_ids:
-                  print(f"Vehicle {vid} left the co-sim ownership set and is on longer CARLA-managed.")
-                  self.handoff_carla_vehicle(vid)
-
-            # State 2: the vehicle just entered the ownership set, so spawn a CARLA actor for it.
-            for cosim_id in cosim_ids:
-                  private_flag, veh_info = cosim_info_map[cosim_id]
+            for cosim_id, cosim_veh, private_flag, veh_info in zip(cosim_ids, cosim_vehs, private_flags, all_data):
                   self.carla_private_flags[cosim_id] = private_flag
-                  if cosim_id not in self.carla_vehs and veh_info['state'] > 0:
-                        if cosim_id in self.displayOnly_vehs:
-                              print(f"Vehicle {cosim_id} switched from display-only to CARLA-managed.")
-                              self.destroy_carla_vehicle(cosim_id)
-                        self.spawn_carla_vehicle(cosim_id, private_flag, veh_info, display_only=False)
-                        self.carla_coordMaps[cosim_id] = cosim_meta_map[cosim_id].get('coord_map', [])
-                        self.carla_route[cosim_id] = cosim_meta_map[cosim_id].get('route', [])
-                        route = self.carla_route[cosim_id]
-                        self.carla_destRoad[cosim_id] = route[-1] if route else None
-                        self.carla_entered[cosim_id] = True
-                        print(f"Vehicle {cosim_id} entered the co-sim ownership set and is now CARLA-managed.")
-
-            # State 3: the vehicle remains in the ownership set, so only synchronize CARLA state back to METS-R.
-            for cosim_id in cosim_ids:
                   if cosim_id in self.carla_vehs:
-                        private_flag, veh_info = cosim_info_map[cosim_id]
-                        self.sync_carla_vehicle(cosim_id, private_flag, veh_info)
-                        #print(f"Vehicle {cosim_id} is CARLA-managed and its state is synchronized back to METS-R.")
-
+                        if cosim_id not in self.carla_waiting_vehs:
+                              self.sync_carla_vehicle(cosim_id, private_flag, veh_info)
+                        else:
+                              if self.metsr.current_tick % 10 == 0:
+                                    success = self.metsr.enter_next_road(cosim_id, private_flag)['DATA'][0]['STATUS']
+                                    if success == 'OK':
+                                          print(f"Vehicle {cosim_id} exited co-sim area.")
+                                          self.destroy_carla_vehicle(cosim_id)
+                                    
+                  else:
+                        if veh_info['state'] > 0:
+                              if cosim_id in self.other_vehs:
+                                    # remove the vehicle from the other_vehs if it is in the co-sim area
+                                    self.destroy_carla_vehicle(cosim_id)
+                              self.spawn_carla_vehicle(cosim_id, private_flag, veh_info, display_only=False)
+                              # add carla coordMap to the carla_vehs
+                              self.carla_coordMaps[cosim_id] = cosim_veh['coord_map'] # add carla coordMap to the carla_vehs
+                              # add carla nextRoad to the carla_vehs
+                              self.carla_route[cosim_id] = cosim_veh['route']
+                              # add carla destRoad to the carla_vehs
+                              self.carla_destRoad[cosim_id] = cosim_veh['route'][-1]
+                              self.carla_entered[cosim_id] = False
             if self.display_all:
-                  self.sync_display_only_vehicles(current_cosim_ids)
+                  private_agents = self.metsr.query_vehicle()['private_vids']
+
+                  # Process display-only vehicles in batches to avoid blocking
+                  batch_size = 10
+                  for i in range(0, len(private_agents), batch_size):
+                        batch_ids = private_agents[i:i+batch_size]
+                        batch_infos = self.metsr.query_vehicle(batch_ids, private_veh=True, transform_coords=True)['DATA']
+
+                        for vid, veh_info in zip(batch_ids, batch_infos):
+                              if vid not in self.carla_vehs and vid not in self.other_vehs:
+                                    if veh_info['state'] > 0:
+                                          self.spawn_carla_vehicle(vid, True, veh_info, display_only=True)
+                              elif vid in self.other_vehs:
+                                    if veh_info['state'] > 0:
+                                          import time
+                                          time.sleep(0.0001)  # Add a small delay to avoid blocking
+                                          self.update_display_only_vehicle(vid, veh_info)
+                                    else:
+                                          self.destroy_carla_vehicle(vid)
      
       def run(self):
             try:
@@ -198,7 +198,7 @@ class CoSimClient(object):
                   if display_only:
                         tmp_veh.set_simulate_physics(False) # Fix the bug of roll axis shaking
                         tmp_veh.set_autopilot(False)
-                        self.displayOnly_vehs[vid] = tmp_veh
+                        self.other_vehs[vid] = tmp_veh
                   else:
                         self.carla_vehs[vid] = tmp_veh
 
@@ -220,67 +220,22 @@ class CoSimClient(object):
                   self.carla_private_flags.pop(vid, None)
                   if vid in self.carla_waiting_vehs:
                         self.carla_waiting_vehs.remove(vid)
-            if vid in self.displayOnly_vehs:
+            if vid in self.other_vehs:
                   try:
-                        self.displayOnly_vehs[vid].destroy()
+                        self.other_vehs[vid].destroy()
                   except:
                         pass
-                  self.displayOnly_vehs.pop(vid, None)
+                  self.other_vehs.pop(vid, None)
             self.destroy_vehicle_sensors(vid)
 
       def update_display_only_vehicle(self, vid, veh_inform):
-            carla_veh = self.displayOnly_vehs.get(vid)
+            carla_veh = self.other_vehs.get(vid)
             if carla_veh:
                   target_loc = self.get_carla_location(veh_inform['x'], veh_inform['y'])
                   tmp_rotation, _ = self.get_carla_rotation(veh_inform)
                   carla_veh.set_transform(carla.Transform(target_loc, tmp_rotation))
-
-      def handoff_carla_vehicle(self, vid):
-            """
-            Stop CARLA-side management once METS-R no longer reports this vehicle as co-sim owned.
-
-            Trip completion is not decided here. If display_all is enabled, the same vehicle can
-            appear again as a display-only METS-R vehicle until METS-R marks it finished.
-            """
-            if vid in self.carla_vehs:
-                  print(f"Vehicle {vid} left the co-sim ownership set.")
-                  self.destroy_carla_vehicle(vid)
-
-      def sync_display_only_vehicles(self, current_cosim_ids):
-            """
-            Mirror METS-R-controlled vehicles in CARLA for visualization only.
-
-            These actors are never part of the co-sim ownership set. They are spawned when METS-R
-            reports them alive and destroyed once METS-R reports state <= 0.
-            """
-            private_agents = self.metsr.query_vehicle()['private_vids']
-
-            batch_size = 10
-            for i in range(0, len(private_agents), batch_size):
-                  batch_ids = private_agents[i:i+batch_size]
-                  batch_infos = self.metsr.query_vehicle(batch_ids, private_veh=True, transform_coords=True)['DATA']
-
-                  for vid, veh_info in zip(batch_ids, batch_infos):
-                        if vid in current_cosim_ids or vid in self.carla_vehs:
-                              continue
-                        if vid not in self.displayOnly_vehs:
-                              if veh_info['state'] > 0:
-                                    self.spawn_carla_vehicle(vid, True, veh_info, display_only=True)
-                        else:
-                              if veh_info['state'] > 0:
-                                    import time
-                                    time.sleep(0.0001)
-                                    self.update_display_only_vehicle(vid, veh_info)
-                              else:
-                                    self.destroy_carla_vehicle(vid)
       
       def sync_carla_vehicle(self, vid, private_veh, veh_inform):
-            """
-            Synchronize one CARLA-managed vehicle back to METS-R.
-
-            This function no longer performs path pushing, submap checks, or destination handling.
-            It only reads the current CARLA pose/speed and teleports that state into METS-R.
-            """
             try:
                   carla_veh = self.carla_vehs[vid]
                   loc = carla_veh.get_location()
@@ -295,6 +250,71 @@ class CoSimClient(object):
             speed = (vel.x**2 + vel.y**2 + vel.z**2) ** 0.5
             bearing = self.get_metsr_rotation(carla_veh.get_transform().rotation.yaw)
             self.metsr.teleport_cosim_vehicle(vid, loc.x, -loc.y, bearing, speed=speed, private_veh=private_veh, transform_coords=True)
+            # Now vehicle is considered on co-sim road
+            if self.is_in_carla_submap(loc.x, loc.y):
+                  if self.carla_entered[vid] == False:
+                        self.carla_entered[vid] = True
+                  #print(f'vehicle{vid} in the cosim area，position：{loc.x}, {loc.y}, {bearing}.')
+            else:
+                  # case 1: vehicle has not entered the co-sim area yet 
+                  if self.carla_entered[vid] == False:
+                        coord_map = self.carla_coordMaps[vid]
+                        if len(coord_map) > 0:
+                              next_pos = coord_map[0]
+                              dist = self.get_distance(loc.x, loc.y, next_pos[0], -next_pos[1])
+                              if dist < 3.0:
+                                    # reached this waypoint, go to next
+                                    coord_map.pop(0)
+                              if len(coord_map) > 0:
+                                    # still has waypoints to follow
+                                    print("Still has waypoints to follow")
+                                    target = coord_map[0]
+                                    # calculate tmp_ratation and tmp_yaw from target[0] and target[1]
+                                    dx = target[0] - loc.x
+                                    dy = -target[1] - loc.y  # CARLA uses left-handed coordinate system
+                                    tmp_yaw = np.degrees(np.arctan2(dy, dx))
+                                    tmp_rotation = carla.Rotation(pitch=0, yaw=tmp_yaw, roll=0)
+                                    # Set transform and velocity
+                                    #carla_veh.set_autopilot(False)
+                                    #carla_veh.set_simulate_physics(False)
+                                    carla_veh.set_transform(
+                                          carla.Transform(self.get_carla_location(target[0], target[1]), tmp_rotation)
+                                    )
+                                    print(target[0], target[1],tmp_yaw)
+                                    tmp_speed = max(veh_inform['speed'], 0.1) # set a minimum speed to avoid stopping
+                                    tmp_speed_x = tmp_speed * np.cos(tmp_yaw * np.pi / 180)
+                                    tmp_speed_y = tmp_speed * np.sin(tmp_yaw * np.pi / 180)
+                                    carla_veh.set_target_velocity(carla.Vector3D(x=tmp_speed_x, y=tmp_speed_y, z=0))
+                        else:
+                              # Destroy vehicle
+                              success = self.metsr.reach_dest(vid)['DATA'][0]['STATUS']
+                              print(f"Vehicle {vid} failed to enter co-sim area; remove it.")
+                              assert success == 'OK', f"Vehicle {vid} failed to reach destination."
+                              
+
+                  else:
+                        print("Vehicle " + str(vid) + " has left the co-sim area.")
+                        # case 2: vehicle has entered the co-sim area
+                        if self.carla_destRoad[vid] in self.config.metsr_road:
+                              # case 2.1: vehicle's destination is within the co-sim area
+                              success = self.metsr.reach_dest(vid, private_veh)['DATA'][0]['STATUS']
+                              assert success == 'OK', f"Vehicle {vid} failed to reach destination."
+                              if success == 'OK':
+                                    print(f"Vehicle {vid} reached destination.")
+                                    self.destroy_carla_vehicle(vid)
+                        else:
+                              # case 2.2: vehicle's destination is outside the co-sim area
+                              success = self.metsr.exit_cosim_region(vid, loc.x, -loc.y, private_veh, True)['DATA'][0]['STATUS']
+                              if success == 'OK':
+                                    print(f"Vehicle {vid} exited co-sim area.")
+                                    self.destroy_carla_vehicle(vid)
+                              else:
+                                    carla_veh.set_autopilot(False)
+                                    carla_veh.set_target_velocity(carla.Vector3D(x=0, y=0, z=0))
+                                    carla_veh.apply_control(carla.VehicleControl(throttle=0, brake=1))
+                                    carla_veh.enable_constant_velocity(carla.Vector3D(x=0, y=0, z=0))
+                              if vid not in self.carla_waiting_vehs:
+                                    self.carla_waiting_vehs.append(vid)
 
 
       def generate_random_trips(self, num_trips, start_vid = 0):
@@ -329,8 +349,8 @@ class CoSimClient(object):
 
             if vid in self.carla_vehs:
                   vehicle = self.carla_vehs[vid]
-            elif vid in self.displayOnly_vehs:
-                  vehicle = self.displayOnly_vehs[vid]
+            elif vid in self.other_vehs:
+                  vehicle = self.other_vehs[vid]
 
             self.carla_veh_sensors[vid] = {}
             self.carla_veh_sensor_queues[vid] = {}
@@ -377,7 +397,7 @@ class CoSimClient(object):
                   self.save_sensor_data(vid, output_path)
             
       def save_sensor_data(self, vid, output_path=None):
-            if vid not in self.carla_vehs and vid not in self.displayOnly_vehs:
+            if vid not in self.carla_vehs and vid not in self.other_vehs:
                   return
             elif vid not in self.carla_veh_sensors:
                   print(f"[Warning] Vehicle {vid} has no deployed sensor.")

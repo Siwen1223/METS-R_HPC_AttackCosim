@@ -34,7 +34,7 @@ class CosimPathPlanner:
     def build_coarse_points(self, route_ids, sampling_locs=(0.2, 0.5)):
         """
         Build laterally offset coarse path points by sampling each road in a METS-R route.
-        Inputs: A sequence of METS-R road IDs; The proportion of the sampling point position to the road length.
+        Inputs: A sequence of METS-R road IDs and the sampling fractions.
         Outputs: Returns coarse_points_metsr and updates coarse_points_carla and missing_edges.
         """
         self.coarse_points_metsr = []
@@ -51,6 +51,13 @@ class CosimPathPlanner:
             if not points:
                 self.missing_edges.append(road_id)
                 continue
+            if i == 0:
+                p0, p1 = self._point_at_fraction(points, 0.02)
+                if p0 is None or p1 is None:
+                    self.missing_edges.append(road_id)
+                else:
+                    off = self._offset_point(p0, p1, self.half_road_width, direction="right")
+                    self.coarse_points_metsr.append(self._sumo_to_metsr(off))
             for frac in sampling_locs:
                 p0, p1 = self._point_at_fraction(points, frac)
                 if p0 is None or p1 is None:
@@ -76,6 +83,45 @@ class CosimPathPlanner:
             return []
         self.build_coarse_points(route_ids)
         self.lane_waypoints = []
+        if len(self.coarse_points_carla) < 2:
+            return []
+        for cur, nxt in zip(self.coarse_points_carla[:-1], self.coarse_points_carla[1:]):
+            segment = self.grp.trace_route(cur, nxt)
+            self.lane_waypoints.extend(segment)
+        return [wp.transform.location for wp, _ in self.lane_waypoints]
+
+    def build_carla_routepoints_from_metsr(self, route_ids, centerline_response, sampling_locs=(0.2, 0.5, 0.8)):
+        """
+        Build a CARLA lane path directly from METS-R lane centerlines instead of XML edge shapes.
+        Unlike build_lane_points(), this uses query_centerline() results that are already in METS-R coordinates,
+        so it skips XML lookup, SUMO net offsets, and lateral offsetting from edge centerlines.
+        """
+        if self.grp is None:
+            return []
+        self.coarse_points_metsr = []
+        self.coarse_points_carla = []
+        self.lane_waypoints = []
+        self.missing_edges = []
+        if not route_ids:
+            return []
+
+        centerline_map = {}
+        for item in centerline_response.get("DATA", []):
+            centerline_map[str(item.get("ID"))] = item.get("centerline", [])
+
+        for road_id in route_ids:
+            points = centerline_map.get(str(road_id), [])
+            if len(points) < 2:
+                self.missing_edges.append(road_id)
+                continue
+            for frac in sampling_locs:
+                sampled, _ = self._point_at_fraction(points, frac)
+                if sampled is None:
+                    self.missing_edges.append(road_id)
+                    continue
+                self.coarse_points_metsr.append((sampled[0], sampled[1]))
+
+        self.coarse_points_carla = [self._metsr_to_carla(point) for point in self.coarse_points_metsr]
         if len(self.coarse_points_carla) < 2:
             return []
         for cur, nxt in zip(self.coarse_points_carla[:-1], self.coarse_points_carla[1:]):

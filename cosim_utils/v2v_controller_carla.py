@@ -107,6 +107,7 @@ class V2VControllerCarla:
         """
         if not coord_map:
             return
+        coord_map = self._path_trim_to_nearest_ahead(coord_map)
         plan = []
         self._route_points = []
         for loc in coord_map:
@@ -132,6 +133,34 @@ class V2VControllerCarla:
         if not route_ids or self.path_planner is None:
             return False
         lane_points = self.path_planner.build_lane_points(route_ids)
+        if draw_plan:
+            self.path_planner.draw_coarse_points()
+            self.path_planner.draw_lane_points()
+        if not lane_points:
+            return False
+        self.set_route_from_carla_coords(
+            lane_points,
+            clean_queue=clean_queue,
+            stop_waypoint_creation=stop_waypoint_creation,
+        )
+        return True
+
+    def set_route_from_metsr_route_with_centerline(
+        self,
+        route_ids,
+        centerline_response,
+        clean_queue=True,
+        stop_waypoint_creation=True,
+        draw_plan=False,
+    ):
+        """
+        Build a CARLA route from METS-R lane centerline query results and load it into the agent.
+        Unlike set_route_from_metsr_route(), this path uses query_centerline() output directly instead of
+        reconstructing coarse points from XML edge geometry.
+        """
+        if not route_ids or self.path_planner is None:
+            return False
+        lane_points = self.path_planner.build_carla_routepoints_from_metsr(route_ids, centerline_response)
         if draw_plan:
             self.path_planner.draw_coarse_points()
             self.path_planner.draw_lane_points()
@@ -529,6 +558,50 @@ class V2VControllerCarla:
         return plan
 
     # Path helpers.
+
+    def _path_trim_to_nearest_ahead(self, coord_map):
+        """
+        Drop only the stale prefix of a route near the current handoff position.
+
+        The trim is intentionally local: it first finds the earliest route point that is close to
+        the ego, then advances within that local neighborhood until the retained start point is no
+        longer behind the ego. This avoids jumping to a later route suffix that happens to be
+        geometrically close to the current position.
+        """
+        if not coord_map:
+            return []
+
+        points = []
+        for loc in coord_map:
+            if isinstance(loc, carla.Location):
+                points.append(loc)
+            else:
+                points.append(carla.Location(x=loc[0], y=loc[1], z=loc[2] if len(loc) > 2 else 0.0))
+
+        ego_loc = self.vehicle.get_location()
+        forward = self.vehicle.get_transform().get_forward_vector()
+        trim_radius = 12.0
+        nearby_idx = None
+        for idx, point in enumerate(points):
+            if ego_loc.distance(point) <= trim_radius:
+                nearby_idx = idx
+                break
+
+        if nearby_idx is None:
+            return points
+
+        start_idx = nearby_idx
+        while start_idx < len(points) - 1:
+            point = points[start_idx]
+            dx = point.x - ego_loc.x
+            dy = point.y - ego_loc.y
+            dz = point.z - ego_loc.z
+            longitudinal = dx * forward.x + dy * forward.y + dz * forward.z
+            if longitudinal >= 0.0 or ego_loc.distance(point) <= 2.0:
+                break
+            start_idx += 1
+
+        return points[start_idx:]
 
     def _path_points(self, count=50):
         """
