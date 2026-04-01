@@ -73,18 +73,23 @@ class CosimPathPlanner:
         self.coarse_points_carla = [self._metsr_to_carla(p) for p in self.coarse_points_metsr]
         return list(self.coarse_points_metsr)
 
-    def build_lane_points(self, route_ids):
+    def build_lane_points(self, route_ids, start_point_carla=None):
         """
         Generate a continuous lane-level CARLA path by connecting the coarse route points with GRP.
-        Inputs: A sequence of METS-R road IDs.
+        Inputs: A sequence of METS-R road IDs and an optional CARLA start point.
         Outputs: Returns CARLA Locations for the lane path and updates lane_waypoints.
         """
         if self.grp is None:
             return []
         self.build_coarse_points(route_ids)
         self.lane_waypoints = []
-        if len(self.coarse_points_carla) < 2:
+        if not self.coarse_points_carla:
             return []
+        if start_point_carla is not None:
+            if start_point_carla.distance(self.coarse_points_carla[0]) > 2.0:
+                self.lane_waypoints.extend(self.grp.trace_route(start_point_carla, self.coarse_points_carla[0]))
+        if len(self.coarse_points_carla) < 2:
+            return [wp.transform.location for wp, _ in self.lane_waypoints]
         for cur, nxt in zip(self.coarse_points_carla[:-1], self.coarse_points_carla[1:]):
             segment = self.grp.trace_route(cur, nxt)
             self.lane_waypoints.extend(segment)

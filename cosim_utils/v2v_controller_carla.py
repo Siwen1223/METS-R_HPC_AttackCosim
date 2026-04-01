@@ -82,6 +82,10 @@ class V2VControllerCarla:
             "ignore_vehicles": True,
         }
         self.agent = BasicAgent(self.vehicle, target_speed=self._to_kmh(target_speed_mps), opt_dict=opt_dict, map_inst=self.map)
+        local_planner = self.agent.get_local_planner()
+        vehicle_controller = getattr(local_planner, "_vehicle_controller", None)
+        if vehicle_controller is not None:
+            vehicle_controller.past_steering = 0.0
         self._route_points = []
         self._last_debug_state = {}
 
@@ -99,7 +103,14 @@ class V2VControllerCarla:
         end_loc = self._metsr_to_carla_location(end_xy[0], end_xy[1])
         self.agent.set_destination(end_loc, start_location=start_loc, clean_queue=clean_queue)
 
-    def set_route_from_carla_coords(self, coord_map, clean_queue=True, stop_waypoint_creation=True):
+    def set_route_from_carla_coords(
+        self,
+        coord_map,
+        clean_queue=True,
+        stop_waypoint_creation=True,
+        start_point_carla=None,
+        start_yaw_carla=None,
+    ):
         """
         Convert a sequence of CARLA coordinates into a global waypoint plan for the agent.
         Inputs: Route coordinates, queue reset option, and stop_waypoint_creation flag.
@@ -107,7 +118,54 @@ class V2VControllerCarla:
         """
         if not coord_map:
             return
-        coord_map = self._path_trim_to_nearest_ahead(coord_map)
+        coord_map = self._path_trim_to_nearest_ahead(
+            coord_map,
+            start_point_carla=start_point_carla,
+            start_yaw_carla=start_yaw_carla,
+        )
+        if self.enable_debug_draw and start_point_carla is not None and coord_map:
+            first_loc = coord_map[0] if isinstance(coord_map[0], carla.Location) else carla.Location(
+                x=coord_map[0][0],
+                y=coord_map[0][1],
+                z=coord_map[0][2] if len(coord_map[0]) > 2 else 0.0,
+            )
+            second_loc = None
+            if len(coord_map) > 1:
+                second_loc = coord_map[1] if isinstance(coord_map[1], carla.Location) else carla.Location(
+                    x=coord_map[1][0],
+                    y=coord_map[1][1],
+                    z=coord_map[1][2] if len(coord_map[1]) > 2 else 0.0,
+                )
+
+            ref_heading = ((start_yaw_carla if start_yaw_carla is not None else self.vehicle.get_transform().rotation.yaw) + 90.0) % 360.0
+            first_dx = first_loc.x - start_point_carla.x
+            first_dy = first_loc.y - start_point_carla.y
+            first_long, first_lat = self._geom_project_to_heading(ref_heading, first_dx, first_dy)
+
+            second_long = None
+            second_lat = None
+            tangent_bearing = None
+            if second_loc is not None:
+                second_dx = second_loc.x - start_point_carla.x
+                second_dy = second_loc.y - start_point_carla.y
+                second_long, second_lat = self._geom_project_to_heading(ref_heading, second_dx, second_dy)
+                seg_dx = second_loc.x - first_loc.x
+                seg_dy = second_loc.y - first_loc.y
+                tangent_bearing = (math.degrees(math.atan2(seg_dx, -seg_dy)) + 360.0) % 360.0
+
+            print(
+                f"[route-trim] veh={self.ego_vid} "
+                f"start=({start_point_carla.x:.2f},{start_point_carla.y:.2f}) "
+                f"first=({first_loc.x:.2f},{first_loc.y:.2f}) "
+                f"first_long={first_long:.2f} first_lat={first_lat:.2f} "
+                f"second="
+                + (
+                    f"({second_loc.x:.2f},{second_loc.y:.2f}) second_long={second_long:.2f} "
+                    f"second_lat={second_lat:.2f} tangent_bearing={tangent_bearing:.2f}"
+                    if second_loc is not None
+                    else "None"
+                )
+            )
         plan = []
         self._route_points = []
         for loc in coord_map:
@@ -124,7 +182,15 @@ class V2VControllerCarla:
                 clean_queue=clean_queue,
             )
 
-    def set_route_from_metsr_route(self, route_ids, clean_queue=True, stop_waypoint_creation=True, draw_plan=False):
+    def set_route_from_metsr_route(
+        self,
+        route_ids,
+        clean_queue=True,
+        stop_waypoint_creation=True,
+        draw_plan=False,
+        start_point_carla=None,
+        start_yaw_carla=None,
+    ):
         """
         Build a CARLA route from a METS-R road-id sequence and load it into the agent.
         Inputs: METS-R route IDs, queue reset option, stop_waypoint_creation flag, and optional draw flag.
@@ -132,7 +198,7 @@ class V2VControllerCarla:
         """
         if not route_ids or self.path_planner is None:
             return False
-        lane_points = self.path_planner.build_lane_points(route_ids)
+        lane_points = self.path_planner.build_lane_points(route_ids, start_point_carla=start_point_carla)
         if draw_plan:
             self.path_planner.draw_coarse_points()
             self.path_planner.draw_lane_points()
@@ -142,6 +208,8 @@ class V2VControllerCarla:
             lane_points,
             clean_queue=clean_queue,
             stop_waypoint_creation=stop_waypoint_creation,
+            start_point_carla=start_point_carla,
+            start_yaw_carla=start_yaw_carla,
         )
         return True
 
@@ -230,6 +298,17 @@ class V2VControllerCarla:
         # Hand the final speed target to BasicAgent and let it generate the low-level CARLA control.
         self.agent.set_target_speed(self._to_kmh(desired_speed))
         control = self.agent.run_step()
+        local_planner = self.agent.get_local_planner()
+        target_wp = getattr(local_planner, "target_waypoint", None)
+        if target_wp is not None:
+            target_loc = target_wp.transform.location
+            print(
+                f"[target-wp] veh={self.ego_vid} "
+                f"loc=({target_loc.x:.2f},{target_loc.y:.2f},{target_loc.z:.2f}) "
+                f"road={target_wp.road_id} lane={target_wp.lane_id}"
+            )
+        else:
+            print(f"[target-wp] veh={self.ego_vid} None")
 
         # Cache a compact summary so the outer script can print one-line debug state per vehicle.
         self._last_debug_state = {
@@ -382,7 +461,16 @@ class V2VControllerCarla:
         if len(junction_points) < 2:
             return False
 
+        ego_heading = ego_v2v.get("heading", 0.0)
         for other_v2v in self._v2v_other_records(data_stream):
+            dx, dy = self._v2v_relative_xy(ego_v2v, other_v2v)
+            longitudinal, lateral = self._geom_project_to_heading(ego_heading, dx, dy)
+            other_heading = other_v2v.get("heading", 0.0)
+            heading_delta = abs((other_heading - ego_heading + 180.0) % 360.0 - 180.0)
+            # Same-direction lead vehicles should be handled by car-following, not junction blocking.
+            if longitudinal > 0.0 and abs(lateral) <= self.lane_half_width * 2.0 and heading_delta <= 35.0:
+                continue
+
             conflict_state = self._conflict_state(ego_v2v, other_v2v, junction_points)
             if conflict_state is None:
                 continue
@@ -559,7 +647,7 @@ class V2VControllerCarla:
 
     # Path helpers.
 
-    def _path_trim_to_nearest_ahead(self, coord_map):
+    def _path_trim_to_nearest_ahead(self, coord_map, start_point_carla=None, start_yaw_carla=None):
         """
         Drop only the stale prefix of a route near the current handoff position.
 
@@ -578,9 +666,14 @@ class V2VControllerCarla:
             else:
                 points.append(carla.Location(x=loc[0], y=loc[1], z=loc[2] if len(loc) > 2 else 0.0))
 
-        ego_loc = self.vehicle.get_location()
-        forward = self.vehicle.get_transform().get_forward_vector()
+        ego_loc = start_point_carla if start_point_carla is not None else self.vehicle.get_location()
+        if start_yaw_carla is not None:
+            yaw_rad = math.radians(start_yaw_carla)
+            forward = carla.Vector3D(x=math.cos(yaw_rad), y=math.sin(yaw_rad), z=0.0)
+        else:
+            forward = self.vehicle.get_transform().get_forward_vector()
         trim_radius = 12.0
+        cos_angle_threshold = math.cos(math.radians(45.0))
         nearby_idx = None
         for idx, point in enumerate(points):
             if ego_loc.distance(point) <= trim_radius:
@@ -596,8 +689,10 @@ class V2VControllerCarla:
             dx = point.x - ego_loc.x
             dy = point.y - ego_loc.y
             dz = point.z - ego_loc.z
+            distance = math.sqrt(dx * dx + dy * dy + dz * dz)
             longitudinal = dx * forward.x + dy * forward.y + dz * forward.z
-            if longitudinal >= 0.0 or ego_loc.distance(point) <= 2.0:
+            cos_angle = 1.0 if distance <= 1e-3 else longitudinal / distance
+            if longitudinal > 0.0 and cos_angle >= cos_angle_threshold:
                 break
             start_idx += 1
 
@@ -630,19 +725,28 @@ class V2VControllerCarla:
 
     def _path_junction_points(self, path_points):
         """
-        Extract the portion of the ego path that passes through the next junction.
+        Extract only the next contiguous junction segment from the ego path.
         Inputs: A list of upcoming CARLA path locations.
         Outputs: Returns the junction-focused path slice or an empty list.
         """
-        junction_indices = []
-        for idx, loc in enumerate(path_points):
+        junction_flags = []
+        for loc in path_points:
             wp = self.map.get_waypoint(loc, project_to_road=True, lane_type=carla.LaneType.Driving)
-            if wp is not None and wp.is_junction:
-                junction_indices.append(idx)
-        if not junction_indices:
+            junction_flags.append(wp is not None and wp.is_junction)
+
+        first_idx = next((idx for idx, is_junction in enumerate(junction_flags) if is_junction), None)
+        if first_idx is None:
             return []
-        start_idx = max(0, junction_indices[0] - 1)
-        end_idx = min(len(path_points), junction_indices[-1] + 2)
+
+        last_idx = first_idx
+        for idx in range(first_idx + 1, len(junction_flags)):
+            if junction_flags[idx]:
+                last_idx = idx
+            else:
+                break
+
+        start_idx = max(0, first_idx - 1)
+        end_idx = min(len(path_points), last_idx + 2)
         return path_points[start_idx:end_idx]
 
     def _path_distance_to_junction_entry(self, path_points):

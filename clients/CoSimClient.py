@@ -45,6 +45,8 @@ class CoSimClient(object):
             self.carla_destRoad = {}
             self.carla_entered = {} # legacy state bit; ownership now comes from query_coSimVehicle()
             self.carla_private_flags = {}
+            self.carla_handoff_locs = {}
+            self.carla_handoff_yaws = {}
 
             self.displayOnly_vehs = {} # id of agent and vehicle controlled by METSR, only used for display all vehicles
 
@@ -144,6 +146,9 @@ class CoSimClient(object):
                         if cosim_id in self.displayOnly_vehs:
                               print(f"Vehicle {cosim_id} switched from display-only to CARLA-managed.")
                               self.destroy_carla_vehicle(cosim_id)
+                        self.carla_handoff_locs[cosim_id] = self.get_carla_location(veh_info['x'], veh_info['y'])
+                        _, handoff_yaw = self.get_carla_rotation(veh_info)
+                        self.carla_handoff_yaws[cosim_id] = handoff_yaw
                         self.spawn_carla_vehicle(cosim_id, private_flag, veh_info, display_only=False)
                         self.carla_coordMaps[cosim_id] = cosim_meta_map[cosim_id].get('coord_map', [])
                         self.carla_route[cosim_id] = cosim_meta_map[cosim_id].get('route', [])
@@ -182,17 +187,29 @@ class CoSimClient(object):
       
       def spawn_carla_vehicle(self, vid, private_veh, veh_inform, display_only=False):
             tmp_rotation, tmp_yaw = self.get_carla_rotation(veh_inform)
-            spawn_point = carla.Transform(self.get_carla_location(veh_inform['x'], veh_inform['y']), tmp_rotation)
+            spawn_loc = self.get_carla_location(veh_inform['x'], veh_inform['y'])
+            spawn_point = carla.Transform(spawn_loc, tmp_rotation)
 
             blueprint = self.carla.get_blueprint_library().find('vehicle.audi.tt' if private_veh else 'vehicle.tesla.model3')
+            tmp_speed = max(min(veh_inform['speed'], 10), 5)
+            tmp_speed_x = tmp_speed * np.cos(tmp_yaw * np.pi / 180)
+            tmp_speed_y = tmp_speed * np.sin(tmp_yaw * np.pi / 180)
+            if not display_only:
+                  print(
+                        f"[handoff] veh={vid} metsr_speed={veh_inform['speed']:.2f} "
+                        f"spawn_loc=({spawn_loc.x:.2f},{spawn_loc.y:.2f},{spawn_loc.z:.2f}) "
+                        f"spawn_yaw={tmp_yaw:.2f} "
+                        f"target_velocity=({tmp_speed_x:.2f},{tmp_speed_y:.2f})"
+                  )
+
             tmp_veh = self.carla.try_spawn_actor(blueprint, spawn_point)
 
             if tmp_veh:
-                  tmp_veh.set_autopilot(True)
-                  self.carla_tm.ignore_lights_percentage(tmp_veh, 100)
-                  tmp_speed = veh_inform['speed']
-                  tmp_speed_x = tmp_speed * np.cos(tmp_yaw * np.pi / 180)
-                  tmp_speed_y = tmp_speed * np.sin(tmp_yaw * np.pi / 180)
+                  # Start each handoff from a neutral control state so the new physics actor does not
+                  # inherit an arbitrary steering command before the CARLA-side controller takes over.
+                  tmp_veh.apply_control(carla.VehicleControl(throttle=0.0, brake=0.0, steer=0.0))
+                  tmp_veh.set_autopilot(False)
+                  #self.carla_tm.ignore_lights_percentage(tmp_veh, 100)
                   tmp_veh.set_target_velocity(carla.Vector3D(x=tmp_speed_x, y=tmp_speed_y, z=0))
 
                   if display_only:
@@ -218,6 +235,8 @@ class CoSimClient(object):
                   self.carla_destRoad.pop(vid, None)
                   self.carla_entered.pop(vid, None)
                   self.carla_private_flags.pop(vid, None)
+                  self.carla_handoff_locs.pop(vid, None)
+                  self.carla_handoff_yaws.pop(vid, None)
                   if vid in self.carla_waiting_vehs:
                         self.carla_waiting_vehs.remove(vid)
             if vid in self.displayOnly_vehs:

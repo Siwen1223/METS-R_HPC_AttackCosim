@@ -15,6 +15,7 @@ import time
 import socket
 import subprocess
 import signal
+import carla
 
 from utils.util import read_run_config, prepare_sim_dirs, run_simulation_in_docker
 from utils.carla_util import open_carla
@@ -163,15 +164,27 @@ if __name__ == "__main__":
         for road in getattr(config, "metsr_road", []):
             cosim_client.metsr.set_cosim_road(road)
     cosim_client.metsr.tick(10)
+    '''signal_ids = cosim_client.metsr.query_signal()['id_list']
+    if signal_ids:
+        cosim_client.metsr.set_signal_phase_plan_ticks(
+            signal_ids,
+            greenTicks=4000,
+            yellowTicks=1,
+            redTicks=1,
+            startPhase=0,
+            tickOffset=0,
+        )
+        print(f"Forced {len(signal_ids)} METS-R signals to stay green.")'''
 
-    flow_a_vids = list(range(1, 11))
-    flow_b_vids = list(range(11, 21))
+    flow_a_vids = list(range(1, 4))
+    #flow_b_vids = list(range(11, 16))
     cosim_client.metsr.generate_trip_between_roads(flow_a_vids, "41", "17")
-    cosim_client.metsr.generate_trip_between_roads(flow_b_vids, "48", "-1")
+    #cosim_client.metsr.generate_trip_between_roads(flow_b_vids, "48", "-1")
     cosim_client.metsr.update_vehicle_sensor_type(flow_a_vids, 1, True)
-    cosim_client.metsr.update_vehicle_sensor_type(flow_b_vids, 1, True)
+    #cosim_client.metsr.update_vehicle_sensor_type(flow_b_vids, 1, True)
 
-    cosim_client.set_custom_camera(-50, 0, 300)
+    #cosim_client.set_custom_camera(-50, 0, 250)
+    cosim_client.set_custom_camera(-50, 100, 100)
 
     replay_data = [[{
         "qty_SV_in_view": 9,
@@ -199,7 +212,7 @@ if __name__ == "__main__":
         "velocity_confidence": 0.5,
     }]]
 
-    controller_vids = flow_a_vids + flow_b_vids
+    controller_vids = flow_a_vids# + flow_b_vids
     # vehicle_with_sensors = list(controller_vids)
     # for vid in vehicle_with_sensors:
     #     cosim_client.enable_vehicle_sensor(vid)
@@ -211,7 +224,7 @@ if __name__ == "__main__":
     net_path = (ROOT_DIR / config.network_file).resolve()
     debug_every_n = 5
     debug_pair_distance = 10.0
-    max_steps = 500
+    max_steps = 800
 
     # dataset_root = ROOT_DIR / "V2X-Attack-Dataset"
     # attack_info = {
@@ -264,13 +277,26 @@ if __name__ == "__main__":
             for vid, controller in controllers.items():
                 if route_synced.get(vid, False):
                     continue
-                if cosim_client.carla_vehs.get(vid) is None:
+                carla_vehicle = cosim_client.carla_vehs.get(vid)
+                if carla_vehicle is None:
                     continue
+                start_loc = cosim_client.carla_handoff_locs.get(vid, carla_vehicle.get_location())
+                start_yaw = cosim_client.carla_handoff_yaws.get(vid)
+                cosim_client.carla.debug.draw_point(
+                    start_loc,
+                    size=0.25,
+                    color=carla.Color(255, 0, 0),
+                    life_time=30.0,
+                    persistent_lines=True,
+                )
+                print(f"Vehicle {vid} route planning start loc=({start_loc.x:.2f},{start_loc.y:.2f},{start_loc.z:.2f})")
                 route_ids = cosim_client.carla_route.get(vid, [])
                 if route_ids and controller.set_route_from_metsr_route(
                     route_ids,
                     stop_waypoint_creation=True,
                     draw_plan=False,
+                    start_point_carla=start_loc,
+                    start_yaw_carla=start_yaw,
                 ):
                         controller.path_planner.draw_lane_points()
                         print(f"Vehicle {vid} route synchronized with METS-R route: {route_ids}")
@@ -286,7 +312,7 @@ if __name__ == "__main__":
                 carla_vehicle.apply_control(control)
                 # data_saver.record_control(i, sim_time, vid, control)
 
-            '''if i <= 200:
+            '''if i <= 500:
                 for data in replay_data[0]:
                     kafkaDataSender.send("bsm", data)'''
 
@@ -322,8 +348,8 @@ if __name__ == "__main__":
             if data_stream is not None:
                 last_stream = data_stream
                 # data_saver.record_bsm(i, sim_time, data_stream)
-            '''if i % debug_every_n == 0:
-                print_controller_debug(i, controllers, cosim_client, min_pair_distance=debug_pair_distance)'''
+            #if i % debug_every_n == 0:
+            print_controller_debug(i, controllers, cosim_client, min_pair_distance=debug_pair_distance)
             time.sleep(0.08)
 
     except KeyboardInterrupt:
