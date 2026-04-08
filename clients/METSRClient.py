@@ -1038,6 +1038,114 @@ class METSRClient:
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] == "CTRL_setSignalPhasePlanTicks", res["TYPE"]
         return res
+
+
+    # Dynamically add one or more zones at given coordinates.
+    # x, y: map coordinates; capacity: zone capacity; zone_type: zone type int;
+    # transform_coord: set True if coords need network CRS transform.
+    # Returns assigned zone IDs.
+    def add_zone(self, x, y, capacity, zone_type, transform_coord=False):
+        msg = {"TYPE": "CTRL_addZone", "DATA": []}
+        if not isinstance(x, list):
+            x = [x]
+            y = [y]
+            capacity = [capacity]
+            zone_type = [zone_type]
+        if not isinstance(transform_coord, list):
+            transform_coord = [transform_coord] * len(x)
+        assert len(x) == len(y) == len(capacity) == len(zone_type), \
+            "x, y, capacity, and zone_type must have the same length"
+        for xi, yi, cap, ztype, tc in zip(x, y, capacity, zone_type, transform_coord):
+            msg["DATA"].append({"x": xi, "y": yi, "transformCoord": tc, "capacity": cap, "type": ztype})
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_addZone", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
+
+    # Dynamically add one or more charging stations at given coordinates.
+    # num_l2/l3/bus: charger counts; price_l2/l3: per-unit prices;
+    # transform_coord: set True if coords need network CRS transform.
+    # Returns assigned (negative) station IDs.
+    def add_charging_station(self, x, y, num_l2, num_l3, num_bus, price_l2, price_l3, transform_coord=False):
+        msg = {"TYPE": "CTRL_addChargingStation", "DATA": []}
+        if not isinstance(x, list):
+            x = [x]
+            y = [y]
+            num_l2 = [num_l2]
+            num_l3 = [num_l3]
+            num_bus = [num_bus]
+            price_l2 = [price_l2]
+            price_l3 = [price_l3]
+        if not isinstance(transform_coord, list):
+            transform_coord = [transform_coord] * len(x)
+        assert len(x) == len(y) == len(num_l2) == len(num_l3) == len(num_bus) == len(price_l2) == len(price_l3), \
+            "All positional arguments must have the same length"
+        for xi, yi, nl2, nl3, nbus, pl2, pl3, tc in zip(x, y, num_l2, num_l3, num_bus, price_l2, price_l3, transform_coord):
+            msg["DATA"].append({"x": xi, "y": yi, "transformCoord": tc,
+                                "numL2": nl2, "numL3": nl3, "numBus": nbus,
+                                "priceL2": pl2, "priceL3": pl3})
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_addChargingStation", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
+
+    # Spawn e-taxis parked at given zone(s).
+    # zoneID: zone ID or list of zone IDs; num: number of taxis to spawn per zone.
+    # Returns spawned vehicle IDs grouped by zone.
+    def add_taxi(self, zoneID, num):
+        msg = {"TYPE": "CTRL_addTaxi", "DATA": []}
+        if not isinstance(zoneID, list):
+            zoneID = [zoneID]
+        if not isinstance(num, list):
+            num = [num] * len(zoneID)
+        assert len(zoneID) == len(num), "zoneID and num must have the same length"
+        for zid, n in zip(zoneID, num):
+            msg["DATA"].append({"zoneID": zid, "num": n})
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_addTaxi", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
+
+    # Spawn e-buses on existing named route(s).
+    # routeName: route name or list of route names; num: buses to spawn per route.
+    # Returns spawned vehicle IDs grouped by route.
+    def add_bus(self, routeName, num):
+        msg = {"TYPE": "CTRL_addBus", "DATA": []}
+        if not isinstance(routeName, list):
+            routeName = [routeName]
+        if not isinstance(num, list):
+            num = [num] * len(routeName)
+        assert len(routeName) == len(num), "routeName and num must have the same length"
+        for rname, n in zip(routeName, num):
+            msg["DATA"].append({"routeName": rname, "num": n})
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_addBus", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
+
+    # Command vehicle(s) to interrupt current activity and go charge.
+    # veh_type: True = private EV, False = public taxi.
+    # charger_type: ChargingStation.L2 / L3 / BUS.
+    # cs_id: 0 = auto-select nearest station; negative int = specific station ID.
+    # After charging the vehicle returns to its pre-charging destination.
+    def go_charging(self, vehID, veh_type, charger_type, cs_id=0):
+        msg = {"TYPE": "CTRL_goCharging", "DATA": []}
+        if not isinstance(vehID, list):
+            vehID = [vehID]
+        if not isinstance(veh_type, list):
+            veh_type = [veh_type] * len(vehID)
+        if not isinstance(charger_type, list):
+            charger_type = [charger_type] * len(vehID)
+        if not isinstance(cs_id, list):
+            cs_id = [cs_id] * len(vehID)
+        assert len(vehID) == len(veh_type) == len(charger_type) == len(cs_id), \
+            "vehID, veh_type, charger_type, and cs_id must have the same length"
+        for vid, vtype, ctype, csid in zip(vehID, veh_type, charger_type, cs_id):
+            msg["DATA"].append({"vehID": vid, "vehType": vtype, "chargerType": ctype, "csID": csid})
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_goCharging", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
      
     
     # reset the simulation with a property file
