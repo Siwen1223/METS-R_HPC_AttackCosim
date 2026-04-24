@@ -517,7 +517,7 @@ class METSRClient:
         return res
         
     # teleport vehicle to a target location specified by road and coordiantes, only work when the road is a cosim road
-    def teleport_cosim_vehicle(self, vehID, x, y, bearing, speed = 0, private_veh = False, transform_coords = False):
+    def teleport_cosim_vehicle(self, vehID, x, y, bearing, speed = 0, z = 0.0, private_veh = False, transform_coords = False):
         msg = {
                 "TYPE": "CTRL_teleportCoSimVeh",
                 "DATA": []
@@ -526,8 +526,11 @@ class METSRClient:
             vehID = [vehID]
             x = [x]
             y = [y]
+            z = [z]
             speed = [speed]
             bearing = [bearing]
+        if not isinstance(z, list):
+            z = [z] * len(vehID)
         if not isinstance(bearing, list):
             bearing = [bearing] * len(vehID)
         if not isinstance(speed, list):
@@ -536,8 +539,8 @@ class METSRClient:
             private_veh = [private_veh] * len(vehID)
         if not isinstance(transform_coords, list):
             transform_coords = [transform_coords] * len(vehID)
-        for vehID, x, y, bearing, speed, private_veh, transform_coords in zip(vehID, x, y, bearing, speed, private_veh, transform_coords):
-            msg["DATA"].append({"vehID": vehID, "x": x, "y": y, "bearing": bearing, "speed": speed, "vehType": private_veh, "transformCoord": transform_coords})
+        for vehID, x, y, z, bearing, speed, private_veh, transform_coords in zip(vehID, x, y, z, bearing, speed, private_veh, transform_coords):
+            msg["DATA"].append({"vehID": vehID, "x": x, "y": y, "z": z, "bearing": bearing, "speed": speed, "vehType": private_veh, "transformCoord": transform_coords})
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] == "CTRL_teleportCoSimVeh", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
@@ -1041,22 +1044,26 @@ class METSRClient:
 
 
     # Dynamically add one or more zones at given coordinates.
-    # x, y: map coordinates; capacity: zone capacity; zone_type: zone type int;
+    # x, y: map coordinates; z: elevation (default 0.0);
+    # capacity: zone capacity; zone_type: zone type int;
     # transform_coord: set True if coords need network CRS transform.
     # Returns assigned zone IDs.
-    def add_zone(self, x, y, capacity, zone_type, transform_coord=False):
+    def add_zone(self, x, y, capacity, zone_type, z=0.0, transform_coord=False):
         msg = {"TYPE": "CTRL_addZone", "DATA": []}
         if not isinstance(x, list):
             x = [x]
             y = [y]
+            z = [z]
             capacity = [capacity]
             zone_type = [zone_type]
+        if not isinstance(z, list):
+            z = [z] * len(x)
         if not isinstance(transform_coord, list):
             transform_coord = [transform_coord] * len(x)
-        assert len(x) == len(y) == len(capacity) == len(zone_type), \
-            "x, y, capacity, and zone_type must have the same length"
-        for xi, yi, cap, ztype, tc in zip(x, y, capacity, zone_type, transform_coord):
-            msg["DATA"].append({"x": xi, "y": yi, "transformCoord": tc, "capacity": cap, "type": ztype})
+        assert len(x) == len(y) == len(z) == len(capacity) == len(zone_type), \
+            "x, y, z, capacity, and zone_type must have the same length"
+        for xi, yi, zi, cap, ztype, tc in zip(x, y, z, capacity, zone_type, transform_coord):
+            msg["DATA"].append({"x": xi, "y": yi, "z": zi, "transformCoord": tc, "capacity": cap, "type": ztype})
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] == "CTRL_addZone", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
@@ -1064,24 +1071,28 @@ class METSRClient:
 
     # Dynamically add one or more charging stations at given coordinates.
     # num_l2/l3/bus: charger counts; price_l2/l3: per-unit prices;
+    # z: elevation (default 0.0);
     # transform_coord: set True if coords need network CRS transform.
     # Returns assigned (negative) station IDs.
-    def add_charging_station(self, x, y, num_l2, num_l3, num_bus, price_l2, price_l3, transform_coord=False):
+    def add_charging_station(self, x, y, num_l2, num_l3, num_bus, price_l2, price_l3, z=0.0, transform_coord=False):
         msg = {"TYPE": "CTRL_addChargingStation", "DATA": []}
         if not isinstance(x, list):
             x = [x]
             y = [y]
+            z = [z]
             num_l2 = [num_l2]
             num_l3 = [num_l3]
             num_bus = [num_bus]
             price_l2 = [price_l2]
             price_l3 = [price_l3]
+        if not isinstance(z, list):
+            z = [z] * len(x)
         if not isinstance(transform_coord, list):
             transform_coord = [transform_coord] * len(x)
-        assert len(x) == len(y) == len(num_l2) == len(num_l3) == len(num_bus) == len(price_l2) == len(price_l3), \
+        assert len(x) == len(y) == len(z) == len(num_l2) == len(num_l3) == len(num_bus) == len(price_l2) == len(price_l3), \
             "All positional arguments must have the same length"
-        for xi, yi, nl2, nl3, nbus, pl2, pl3, tc in zip(x, y, num_l2, num_l3, num_bus, price_l2, price_l3, transform_coord):
-            msg["DATA"].append({"x": xi, "y": yi, "transformCoord": tc,
+        for xi, yi, zi, nl2, nl3, nbus, pl2, pl3, tc in zip(x, y, z, num_l2, num_l3, num_bus, price_l2, price_l3, transform_coord):
+            msg["DATA"].append({"x": xi, "y": yi, "z": zi, "transformCoord": tc,
                                 "numL2": nl2, "numL3": nl3, "numBus": nbus,
                                 "priceL2": pl2, "priceL3": pl3})
         res = self.send_receive_msg(msg, ignore_heartbeats=True)

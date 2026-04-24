@@ -229,7 +229,7 @@ class CoSimClient(object):
                   carla_veh = self.carla_vehs[vid]
                   loc = carla_veh.get_location()
             bearing = self.get_metsr_rotation(carla_veh.get_transform().rotation.yaw)
-            self.metsr.teleport_cosim_vehicle(vid, loc.x, -loc.y, bearing, private_veh, transform_coords=True)
+            self.metsr.teleport_cosim_vehicle(vid, loc.x, -loc.y, bearing, 0.0, loc.z, private_veh, transform_coords=True)
             # Now vehicle is considered on co-sim road
             if self.is_in_carla_submap(loc.x, loc.y):
                   if self.carla_entered[vid] == False:
