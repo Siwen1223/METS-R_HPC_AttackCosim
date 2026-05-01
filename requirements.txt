@@ -8,7 +8,6 @@ ujson
 websockets
 
 # Optional
-# gurobipy
 # kafka-python
 # adtk
 # scikit-learn

@@ -27,5 +27,6 @@
       "private_gv_demand_file":null,
       "private_ev_charging_preference":null,
       "bt_event_file":null,
-      "bt_event_std_file":null
+      "bt_event_std_file":null,
+      "json_output": true
 }

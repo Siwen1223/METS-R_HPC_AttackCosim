@@ -1,0 +1,12 @@
+{
+      "parent_config": "run_interactive_Template.json",
+      "name": "Birmingham",
+      "sim_step_size": 0.2,
+      "initial_x": 0,
+      "initial_y": 0,
+      "network_file": "data/Birmingham/facility/road/birmingham.net.xml",
+      "zone_file": "data/Birmingham/facility/zone/bus_zones",
+      "charging_station_file": "data/Birmingham/facility/charging_station/birmingham_cs",
+      "num_etaxi": 1000,
+      "num_ebus": 100
+}
