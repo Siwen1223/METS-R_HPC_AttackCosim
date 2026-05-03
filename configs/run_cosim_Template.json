@@ -9,6 +9,7 @@
       "random_seeds": [42],
       "sim_step_size": 0.1,
       "template": "Template",
+      "verbose": false,
       "v2x": true,
       "initial_x": 0,
       "initial_y": 0,
@@ -28,10 +29,11 @@
       "private_gv_demand_file":null,
       "private_ev_charging_preference":null,
       "metsr_port": [4000],
-      "carla_dir": "G:/CARLA_0.9.15/WindowsNoEditor/CarlaUE4.exe",
+      "carla_dir": "/home/siwen/Software/CARLA_0.9.16/start_carla.sh",
       "carla_host": "127.0.0.1",
       "carla_port": 2000,
       "carla_map": "Town05",
       "tm_port": 8000,
-      "sim_minutes": 10
+      "sim_minutes": 10,
+      "json_output": true
 }

@@ -4,6 +4,7 @@ import threading
 from datetime import datetime
 from websockets.sync.client import connect
 from utils.util import *
+import networkx as nx
 
 str_list_to_int_list = str_list_mapper_gen(int)
 str_list_to_float_list = str_list_mapper_gen(float)
@@ -99,6 +100,11 @@ class METSRClient:
                     self.current_tick = 0
                     continue
 
+                # Allow error message
+                if msg["TYPE"] in {"ANS_error"}:
+                    print(f"Error: {msg['MSG']}")
+                    return None
+
                 # Return decoded message, if it's not an ignored heartbeat
                 if not ignore_heartbeats or msg["TYPE"] != "STEP":
                     return msg
@@ -120,17 +126,12 @@ class METSRClient:
                     if(max_attempts > 0):
                         res = self.receive_msg(ignore_heartbeats=ignore_heartbeats, waiting_forever=False)
                         if num_attempts >= max_attempts:
-                            print(f"Failed to receive response after {max_attempts} attempts")
-                            break
+                            raise TimeoutError(f"No response received for '{msg.get('TYPE', 'unknown')}' after {max_attempts} attempts")
                     else:
                         res = self.receive_msg(ignore_heartbeats=ignore_heartbeats, waiting_forever=True)
             except KeyboardInterrupt:
                 print("\nKeyboardInterrupt detected. Stopping the current operation but keeping the server active.")
-                # Reset state or resources if necessary to allow future operations
                 return None  # Return None to indicate the operation was interrupted
-            except Exception as e:
-                print(f"An unexpected error occurred: {e}")
-                # Optional: Handle other types of exceptions if needed
             return res
 
     def tick(self, step_num = 1, wait_forever = False):
@@ -151,6 +152,60 @@ class METSRClient:
     # QUERY: inspect the state of the simulator
     # By default query public vehicles
     def query_vehicle(self, id = None, private_veh = False, transform_coords = False):
+        """Query the full kinematic state of one or more vehicles.
+
+        Without ``id`` the server returns two lists::
+
+            {
+              'public_vids':  [...],   # IDs of public vehicles (taxis + buses)
+              'private_vids': [...],   # IDs of private vehicles (EV / GV)
+              'TYPE': 'ANS_vehicle'
+            }
+
+        With ``id`` each matched vehicle produces::
+
+            {
+              'ID':      <int>   internal vehicle ID,
+              'v_type':  <int>   vehicle class:
+                                   0 = GV  (private gasoline vehicle)
+                                   1 = ETAXI
+                                   2 = EBUS
+                                   3 = EV  (private electric vehicle),
+              'state':   <int>   trip state (see Vehicle.java):
+                                  -1 = NONE_OF_THE_ABOVE (not on network / idle)
+                                   0 = PARKING
+                                   1 = OCCUPIED_TRIP
+                                   2 = INACCESSIBLE_RELOCATION_TRIP
+                                   3 = BUS_TRIP
+                                   4 = CHARGING_TRIP
+                                   5 = CRUISING_TRIP
+                                   6 = PICKUP_TRIP
+                                   7 = ACCESSIBLE_RELOCATION_TRIP
+                                   8 = PRIVATE_TRIP
+                                   9 = CHARGING_RETURN_TRIP,
+              'x':       <float> network-CRS x coordinate (or lon if transform_coords=True),
+              'y':       <float> network-CRS y coordinate (or lat if transform_coords=True),
+              'z':       <float> elevation,
+              'bearing': <float> heading in degrees (0 = north, clockwise),
+              'acc':     <float> current longitudinal acceleration (m/s²),
+              'speed':   <float> current speed (m/s),
+              'road':    <str>   SUMO road ID of the road the vehicle is on
+                                 (only present when vehicle is on a road),
+              'lane':    <int>   lane index on that road (present when on a lane),
+              'dist':    <float> distance to the next downstream junction (m)
+                                 (present when on a lane)
+            }
+
+        Parameters
+        ----------
+        id : int | list[int] | None
+            Vehicle ID(s) to query. Pass ``None`` to get all fleet IDs.
+        private_veh : bool | list[bool]
+            ``True`` for private vehicles (EV/GV), ``False`` for public
+            (taxi/bus). Must match the length of ``id`` if both are lists.
+        transform_coords : bool | list[bool]
+            ``True`` to return WGS-84 lon/lat instead of network CRS.
+        """
         msg = {"TYPE": "QUERY_vehicle"}
         if id is not None:
             msg["DATA"] = []
@@ -167,8 +222,40 @@ class METSRClient:
         assert res["TYPE"] == "ANS_vehicle", res["TYPE"]
         return res
  
-    # query taxi
     def query_taxi(self, id = None):
+        """Query the state of one or more e-taxis.
+
+        Without ``id`` returns a fleet-level summary::
+
+            {'id_list': [...], 'TYPE': 'ANS_taxi'}
+
+        With ``id`` each matched taxi produces::
+
+            {
+              'ID':       <int>   internal vehicle ID,
+              'state':    <int>   operational state:
+                                   0 = PARKING        – parked at a zone, waiting for a request
+                                   1 = OCCUPIED_TRIP  – carrying passenger(s) to drop-off
+                                   2 = INACCESSIBLE_RELOCATION_TRIP – repositioning, not assignable
+                                   4 = CHARGING_TRIP  – heading to a charging station
+                                   5 = CRUISING_TRIP  – cruising without a passenger
+                                   6 = PICKUP_TRIP    – en-route to pick up a passenger
+                                   7 = ACCESSIBLE_RELOCATION_TRIP – repositioning but still assignable
+                                   9 = CHARGING_RETURN_TRIP – returning from charging,
+              'x':        <float> network-CRS x coordinate,
+              'y':        <float> network-CRS y coordinate,
+              'z':        <float> elevation,
+              'origin':   <int>   current origin zone ID,
+              'dest':     <int>   current destination zone ID
+                                  (negative → heading to a charging station),
+              'pass_num': <int>   number of passengers currently on board
+            }
+
+        Parameters
+        ----------
+        id : int | list[int] | None
+            Taxi ID(s) to query. Pass ``None`` to get the full fleet ID list.
+        """
         my_msg = {"TYPE": "QUERY_taxi"}
         if id is not None:
             my_msg['DATA'] = []
@@ -181,8 +268,37 @@ class METSRClient:
         assert res["TYPE"] == "ANS_taxi", res["TYPE"]
         return res
         
-    # query bus
     def query_bus(self, id = None):
+        """Query the state of one or more electric buses.
+
+        Without ``id`` returns::
+
+            {'id_list': [...], 'TYPE': 'ANS_bus'}
+
+        With ``id`` each matched bus produces::
+
+            {
+              'ID':            <int>   internal vehicle ID,
+              'route':         <str>   name of the current bus route
+                                       (empty string if the bus is idle),
+              'current_stop':  <int>   index of the last completed stop
+                                       in the route's stop list (0-based),
+              'pass_num':      <int>   number of passengers currently on board,
+              'battery_state': <float> remaining battery energy (kWh)
+            }
+
+        Notes
+        -----
+        Bus trip states are the same integer codes as other vehicles
+        (see :meth:`query_vehicle`), but buses only use:
+          ``BUS_TRIP (3)``, ``CHARGING_TRIP (4)``, and
+          ``CHARGING_RETURN_TRIP (9)`` during normal operation.
+
+        Parameters
+        ----------
+        id : int | list[int] | None
+            Bus ID(s) to query. Pass ``None`` to get the full fleet ID list.
+        """
         my_msg = {"TYPE": "QUERY_bus"}
         if id is not None:
             my_msg['DATA'] = []
@@ -195,8 +311,32 @@ class METSRClient:
         return res
 
         
-    # query road
     def query_road(self, id = None):
+        """Query static and real-time attributes of one or more roads.
+
+        Without ``id`` returns the full road index::
+
+            {'id_list': [...], 'orig_id': [...], 'TYPE': 'ANS_road'}
+
+        With ``id`` (SUMO road IDs, i.e. ``orig_id`` strings) each matched
+        road produces::
+
+            {
+              'ID':               <str>   SUMO original road ID,
+              'r_type':           <int>   road type code,
+              'num_veh':          <int>   current number of vehicles on the road,
+              'speed_limit':      <float> posted speed limit (m/s),
+              'avg_travel_time':  <float> recent mean travel time (s),
+              'length':           <float> road length (m),
+              'energy_consumed':  <float> cumulative energy consumed on this road (kWh),
+              'down_stream_road': <list>  list of downstream road orig-IDs
+            }
+
+        Parameters
+        ----------
+        id : str | list[str] | None
+            SUMO road ID(s) to query. Pass ``None`` to get the full road index.
+        """
         my_msg = {"TYPE": "QUERY_road"}
         if id is not None:
             my_msg['DATA'] = []
@@ -208,8 +348,27 @@ class METSRClient:
         assert res["TYPE"] == "ANS_road", res["TYPE"]
         return res
     
-    # query centerline
     def query_centerline(self, id, lane_index = -1, transform_coords = False):
+        """Query the geometric center-line of a road or a specific lane.
+
+        Each matched road returns::
+
+            {
+              'ID':         <str>         SUMO road ID,
+              'centerline': [[x, y, z], ...]  ordered coordinate list
+            }
+
+        Parameters
+        ----------
+        id : str | list[str]
+            SUMO road ID(s) to query. Required; cannot be ``None``.
+        lane_index : int | list[int]
+            Index of the lane whose centerline to return.
+            Use ``-1`` (default) to get the road's overall start/end points
+            instead of a per-lane polyline.
+        transform_coords : bool | list[bool]
+            ``True`` to return WGS-84 lon/lat instead of network CRS.
+        """
         my_msg = {"TYPE": "QUERY_centerLine"}
         if id is not None:
             my_msg['DATA'] = []
@@ -227,8 +386,34 @@ class METSRClient:
         assert res["TYPE"] == "ANS_centerLine", res["TYPE"]
         return res
 
-    # query zone
     def query_zone(self, id = None):
+        """Query demand and supply statistics for one or more traffic zones.
+
+        Without ``id`` returns the full zone index::
+
+            {'id_list': [...], 'TYPE': 'ANS_zone'}
+
+        With ``id`` each matched zone produces::
+
+            {
+              'ID':          <int>   zone ID,
+              'z_type':      <int>   zone type code,
+              'taxi_demand': <int>   number of pending taxi requests currently
+                                     waiting in this zone,
+              'bus_demand':  <int>   number of pending bus requests currently
+                                     waiting in this zone,
+              'veh_stock':   <int>   number of available taxis parked / cruising
+                                     in this zone at this tick,
+              'x':           <float> centroid x coordinate (network CRS),
+              'y':           <float> centroid y coordinate (network CRS),
+              'z':           <float> centroid elevation
+            }
+
+        Parameters
+        ----------
+        id : int | list[int] | None
+            Zone ID(s) to query. Pass ``None`` to get the full zone ID list.
+        """
         my_msg = {"TYPE": "QUERY_zone"}
         if id is not None:
             my_msg['DATA'] = []
@@ -240,8 +425,42 @@ class METSRClient:
         assert res["TYPE"] == "ANS_zone", res["TYPE"] 
         return res
 
-    # query signal
     def query_signal(self, id = None):
+        """Query the phase state of one or more traffic signals.
+
+        Without ``id`` returns the full signal index::
+
+            {'id_list': [...], 'TYPE': 'ANS_signal'}
+
+        With ``id`` each matched signal produces::
+
+            {
+              'ID':               <int>  internal signal ID,
+              'groupID':          <str>  SUMO junction ID this signal belongs to,
+              'state':            <int>  current phase:
+                                           0 = Green
+                                           1 = Yellow
+                                           2 = Red,
+              'nex_state':        <int>  next phase (same encoding),
+              'next_update_time': <int>  simulation tick at which the phase will change,
+              'phase_ticks':      <list> [green_ticks, yellow_ticks, red_ticks]
+                                         duration of each phase in simulation ticks
+            }
+
+        Notes
+        -----
+        Phase cycle order is always Green → Yellow → Red → Green.
+        Each tick corresponds to ``GlobalVariables.SIMULATION_STEP_SIZE`` seconds
+        (typically 0.5 s, so multiply ticks × 0.5 to get seconds).
+
+        Use :meth:`query_signal_group` to map a SUMO junction ID to the list of
+        individual signal IDs it contains.
+
+        Parameters
+        ----------
+        id : int | list[int] | None
+            Signal ID(s) to query. Pass ``None`` to get the full signal ID list.
+        """
         my_msg = {"TYPE": "QUERY_signal"}
         if id is not None:
             my_msg['DATA'] = []
@@ -253,8 +472,25 @@ class METSRClient:
         assert res["TYPE"] == "ANS_signal", res["TYPE"]
         return res
     
-    # query signal groups
     def query_signal_group(self, id = None):
+        """Query the set of signal IDs that belong to each signal group (junction).
+
+        Without ``id`` returns all group IDs::
+
+            {'id_list': [...], 'TYPE': 'ANS_signalGroup'}
+
+        With ``id`` (SUMO junction / group IDs) each group produces::
+
+            {
+              'groupID':   <str>   SUMO junction ID,
+              'signalIDs': <list>  list of individual signal IDs in this group
+            }
+
+        Parameters
+        ----------
+        id : str | list[str] | None
+            Group / junction ID(s) to query. Pass ``None`` to list all groups.
+        """
         my_msg = {"TYPE": "QUERY_signalGroup"}
         if id is not None:
             my_msg['DATA'] = []
@@ -266,8 +502,30 @@ class METSRClient:
         assert res["TYPE"] == "ANS_signalGroup", res["TYPE"]
         return res
     
-    # query signal for connection between two consecutive roads
     def query_signal_between_roads(self, upstream_road, downstream_road):
+        """Query the signal controlling the connection between two consecutive roads.
+
+        Each connection produces::
+
+            {
+              'upStreamRoad':    <str>  SUMO ID of the upstream road,
+              'downStreamRoad':  <str>  SUMO ID of the downstream road,
+              'signalID':        <int>  signal ID (use with :meth:`query_signal`),
+              'state':           <int>  current phase (0=Green, 1=Yellow, 2=Red),
+              'next_state':      <int>  next phase (same encoding),
+              'next_update_tick':<int>  simulation tick at which the phase changes,
+              'phase_ticks':     <list> [green_ticks, yellow_ticks, red_ticks],
+              'junction_id':     <int>  internal junction ID,
+              'STATUS':          <str>  'OK' or 'KO' (road / junction not found)
+            }
+
+        Parameters
+        ----------
+        upstream_road : str | list[str]
+            SUMO road ID(s) of the upstream road.
+        downstream_road : str | list[str]
+            SUMO road ID(s) of the downstream road (matched pairwise).
+        """
         msg = {"TYPE": "QUERY_signalForConnection", "DATA": []}
         if not isinstance(upstream_road, list):
             upstream_road = [upstream_road]
@@ -282,8 +540,41 @@ class METSRClient:
         assert res["TYPE"] == "ANS_signalForConnection", res["TYPE"]
         return res
     
-    # query chargingStation
     def query_chargingStation(self, id = None):
+        """Query the status and capacity of one or more charging stations.
+
+        Without ``id`` returns the full station index::
+
+            {'id_list': [...], 'TYPE': 'ANS_chargingStation'}
+
+        With ``id`` each matched station produces::
+
+            {
+              'ID':                <int>   internal station ID,
+              'l2_charger':        <int>   total number of L2 (AC) charger ports,
+              'dcfc_charger':      <int>   total number of DCFC (L3 / fast) charger ports,
+              'l2_price':          <float> current price per kWh at L2 chargers,
+              'dcfc_price':        <float> current price per kWh at DCFC chargers,
+              'bus_charger':       <int>   total number of bus-dedicated charger ports,
+              'num_available_l2':  <int>   number of L2 ports not currently occupied,
+              'num_available_dcfc':<int>   number of DCFC ports not currently occupied,
+              'x':                 <float> station x coordinate (network CRS),
+              'y':                 <float> station y coordinate (network CRS),
+              'z':                 <float> elevation
+            }
+
+        Notes
+        -----
+        Charger type codes used internally by the server:
+          ``ChargingStation.L2 = 0``  (AC Level-2),
+          ``ChargingStation.L3 = 1``  (DC fast charging),
+          ``ChargingStation.BUS = 2`` (depot charger for electric buses).
+
+        Parameters
+        ----------
+        id : int | list[int] | None
+            Charging station ID(s) to query. Pass ``None`` to get the full list.
+        """
         my_msg = {"TYPE": "QUERY_chargingStation"}
         if id is not None:
             my_msg['DATA'] = []
@@ -295,15 +586,57 @@ class METSRClient:
         assert res["TYPE"] == "ANS_chargingStation", res["TYPE"]
         return res
     
-    # query vehicleID within the co-sim road
     def query_coSimVehicle(self):
+        """Query vehicles currently on co-simulation (CARLA-managed) roads.
+
+        Returns all vehicles that are located on roads previously registered
+        with :meth:`set_cosim_road`.  Each entry in ``DATA`` represents one
+        vehicle::
+
+            {
+              'ID':        <int>   vehicle ID
+                                    – for private vehicles (EV/GV) this is the
+                                      *external* private-vehicle ID
+                                    – for public vehicles (taxi/bus) this is the
+                                      internal simulation ID,
+              'v_type':    <bool>  True  → private vehicle (EV / GV)
+                                   False → public vehicle (taxi / bus),
+              'coord_map': <list>  recent coordinate history (up to 6 entries),
+                                   each entry is [x, y, z, bearing, speed],
+              'route':     <list>  list of upcoming road orig-IDs in the vehicle's
+                                   current planned route
+            }
+
+        Returns
+        -------
+        dict
+            ``{'DATA': [...], 'TYPE': 'ANS_coSimVehicle'}``
+        """
         my_msg = {"TYPE": "QUERY_coSimVehicle"}
         res = self.send_receive_msg(my_msg, ignore_heartbeats=True)
         assert res["TYPE"] == "ANS_coSimVehicle", res["TYPE"]
         return res
     
-    # query route between coordinates
     def query_route(self, orig_x, orig_y, dest_x, dest_y, transform_coords = False):
+        """Query the shortest path between two geographic coordinates.
+
+        Each query pair returns::
+
+            {'road_list': [<road_orig_id>, ...]}
+
+        or ``'KO'`` if no path was found.
+
+        Parameters
+        ----------
+        orig_x, orig_y : float | list[float]
+            Origin coordinate(s) in network CRS (or lon/lat if
+            ``transform_coords=True``).
+        dest_x, dest_y : float | list[float]
+            Destination coordinate(s) (matched pairwise with origin).
+        transform_coords : bool | list[bool]
+            ``True`` if the input coordinates are WGS-84 lon/lat and should be
+            projected into the network CRS before routing.
+        """
         msg = {"TYPE": "QUERY_routesBwCoords", "DATA": []}
         if not isinstance(orig_x, list):
             orig_x = [orig_x]
@@ -323,9 +656,64 @@ class METSRClient:
 
         assert res["TYPE"] == "ANS_routesBwCoords", res["TYPE"]
         return res
+
+    def query_k_routes(self, orig_x, orig_y, dest_x, dest_y, k, transform_coords = False):
+        """Query the *k* shortest paths between two geographic coordinates.
+
+        Each query pair returns::
+
+            {'road_lists': [[<road_orig_id>, ...], ...]}  # k routes
+
+        or ``'KO'`` if no path was found.
+
+        Parameters
+        ----------
+        orig_x, orig_y : float | list[float]
+            Origin coordinate(s).
+        dest_x, dest_y : float | list[float]
+            Destination coordinate(s).
+        k : int | list[int]
+            Number of alternative routes to return per query.
+        transform_coords : bool | list[bool]
+            ``True`` to interpret coordinates as WGS-84 lon/lat.
+        """
+        msg = {"TYPE": "QUERY_multiRoutesBwCoords", "DATA": []}
+        if not isinstance(orig_x, list):
+            orig_x = [orig_x]
+            orig_y = [orig_y]
+            dest_x = [dest_x]
+            dest_y = [dest_y]
+            k = [k]
+        if not isinstance(transform_coords, list):
+            transform_coords = [transform_coords] * len(orig_x)
+        if not isinstance(k, list):
+            k = [k] * len(orig_x)
+        
+        assert len(orig_x) == len(orig_y) == len(dest_x) == len(dest_y), "Length of orig_x, orig_y, dest_x, and dest_y must be the same"
+
+        for orig_x, orig_y, dest_x, dest_y, transform_coord, k in zip(orig_x, orig_y, dest_x, dest_y, transform_coords, k):
+            msg["DATA"].append({"origX": orig_x, "origY": orig_y, "destX": dest_x, "destY": dest_y, "transformCoord": transform_coord, "K": k})
+        
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "ANS_kRoutes", res["TYPE"]
+        return res
     
-    # query route between roads
     def query_route_between_roads(self, orig_road, dest_road):
+        """Query the shortest path between two roads identified by their SUMO IDs.
+
+        Each query pair returns::
+
+            {'road_list': [<road_orig_id>, ...]}
+
+        or ``'KO'`` if no path was found.
+
+        Parameters
+        ----------
+        orig_road : str | list[str]
+            SUMO road ID(s) of the origin road.
+        dest_road : str | list[str]
+            SUMO road ID(s) of the destination road (matched pairwise).
+        """
         msg = {"TYPE": "QUERY_routesBwRoads", "DATA": []}
         if not isinstance(orig_road, list):
             orig_road = [orig_road]
@@ -342,8 +730,66 @@ class METSRClient:
         assert res["TYPE"] == "ANS_routesBwRoads", res["TYPE"]
         return res
 
-    # query road weights in the routing map
+    def query_k_routes_between_roads(self, orig_road, dest_road, k):
+        """Query the *k* shortest paths between two roads.
+
+        Each query pair returns::
+
+            {'road_lists': [[<road_orig_id>, ...], ...]}  # k routes
+
+        or ``'KO'`` if no path was found.
+
+        Parameters
+        ----------
+        orig_road : str | list[str]
+            SUMO road ID(s) of the origin road.
+        dest_road : str | list[str]
+            SUMO road ID(s) of the destination road.
+        k : int | list[int]
+            Number of alternative routes to return per query.
+        """
+        msg = {"TYPE": "QUERY_multiRoutesBwRoads", "DATA": []}
+        if not isinstance(orig_road, list):
+            orig_road = [orig_road]
+            dest_road = [dest_road]
+            k = [k]
+        if not isinstance(k, list):
+            k = [k] * len(orig_road)
+
+        assert len(orig_road) == len(dest_road), "Length of orig_road and dest_road must be the same"
+        
+        for orig_road, dest_road, k in zip(orig_road, dest_road, k):
+            msg["DATA"].append({"orig": orig_road, "dest": dest_road, "K": k})
+        
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "ANS_multiRoutesBwRoads", res["TYPE"]
+        return res
+
     def query_road_weights(self, roadID = None):
+        """Query the routing-graph edge weight of one or more roads.
+
+        Without ``roadID`` returns all road/edge IDs::
+
+            {'id_list': [...], 'orig_id': [...], 'TYPE': 'ANS_edgeWeight'}
+
+        With ``roadID`` each matched road produces::
+
+            {
+              'ID':              <str>   SUMO road ID,
+              'r_type':          <int>   road type code,
+              'avg_travel_time': <float> recent mean travel time (s),
+              'length':          <float> road length (m),
+              'weight':          <float> current edge weight used by the
+                                         router (typically travel time, may
+                                         be overridden via
+                                         :meth:`update_edge_weight`)
+            }
+
+        Parameters
+        ----------
+        roadID : str | list[str] | None
+            SUMO road ID(s). Pass ``None`` to get all edges.
+        """
         msg = {"TYPE": "QUERY_edgeWeight"}
         if roadID is not None:
             msg["DATA"] = []
@@ -355,8 +801,27 @@ class METSRClient:
         assert res["TYPE"] == "ANS_edgeWeight", res["TYPE"]
         return res
     
-    # query bus route
     def query_bus_route(self, routeID = None):
+        """Query the stop sequence and road IDs of one or more bus routes.
+
+        Without ``routeID`` returns all route identifiers::
+
+            {'id_list': [...], 'orig_id': [...], 'TYPE': 'ANS_busRoute'}
+
+        With ``routeID`` (route *name* strings) each matched route produces::
+
+            {
+              'routeName': <str>   human-readable route name,
+              'routeID':   <int>   internal integer route ID,
+              'stopZones': <list>  ordered list of zone IDs the bus visits,
+              'stopRoads': <list>  corresponding SUMO road IDs at each stop
+            }
+
+        Parameters
+        ----------
+        routeID : str | list[str] | None
+            Route name(s) to query. Pass ``None`` to list all routes.
+        """
         msg = {"TYPE": "QUERY_busRoute"}
         if routeID is not None:
             msg["DATA"] = []
@@ -368,8 +833,26 @@ class METSRClient:
         assert res["TYPE"] == "ANS_busRoute", res["TYPE"]
         return res
     
-    # find bus with route
     def query_route_bus(self, routeID = None):
+        """Query the IDs of all buses currently operating on a given route.
+
+        Without ``routeID`` returns all route identifiers::
+
+            {'id_list': [...], 'orig_id': [...], 'TYPE': 'ANS_busWithRoute'}
+
+        With ``routeID`` (route *name* strings) each matched route produces::
+
+            {
+              'routeName': <str>   human-readable route name,
+              'routeID':   <int>   internal integer route ID,
+              'busIDs':    <list>  IDs of buses currently assigned to this route
+            }
+
+        Parameters
+        ----------
+        routeID : str | list[str] | None
+            Route name(s) to query. Pass ``None`` to list all routes.
+        """
         msg = {"TYPE": "QUERY_busWithRoute"}
         if routeID is not None:
             msg["DATA"] = []
@@ -380,6 +863,42 @@ class METSRClient:
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] == "ANS_busWithRoute", res["TYPE"]
         return res
+
+    def query_routing_graph(self):
+        """Build and return the full road network as a directed NetworkX graph.
+
+        Queries all roads and assembles a ``networkx.DiGraph`` where each node
+        is a SUMO road orig-ID and each directed edge represents a downstream
+        connection between consecutive roads.
+
+        Node attributes::
+
+            length      <float>  road length (m)
+            speed_limit <float>  posted speed limit (m/s)
+            r_type      <int>    road type code
+
+        Returns
+        -------
+        networkx.DiGraph
+            Road-level connectivity graph (no edge weights).
+        """
+        # Step 1: get all road IDs by querying without arguments
+        all_roads_res = self.query_road()
+        road_ids = all_roads_res['orig_id']
+
+        # Step 2: query road details in batches of 10 and build the graph
+        graph = nx.DiGraph()
+        batch_size = 10
+        for batch_start in range(0, len(road_ids), batch_size):
+            batch = road_ids[batch_start : batch_start + batch_size]
+            res = self.query_road(id=batch)
+            for road in res['DATA']:
+                src = road['ID']
+                graph.add_node(src, length=road['length'], speed_limit=road['speed_limit'], r_type=road['r_type'])
+                for dst in road['down_stream_road']:
+                    graph.add_edge(src, dst)
+
+        return graph
 
     # CONTROL: change the state of the simulator
     # generate a vehicle trip between origin and destination zones
@@ -454,7 +973,7 @@ class METSRClient:
         return res
         
     # teleport vehicle to a target location specified by road and coordiantes, only work when the road is a cosim road
-    def teleport_cosim_vehicle(self, vehID, x, y, bearing, speed = 0, private_veh = False, transform_coords = False):
+    def teleport_cosim_vehicle(self, vehID, x, y, bearing, speed = 0, z = 0.0, private_veh = False, transform_coords = False):
         msg = {
                 "TYPE": "CTRL_teleportCoSimVeh",
                 "DATA": []
@@ -463,8 +982,11 @@ class METSRClient:
             vehID = [vehID]
             x = [x]
             y = [y]
+            z = [z]
             speed = [speed]
             bearing = [bearing]
+        if not isinstance(z, list):
+            z = [z] * len(vehID)
         if not isinstance(bearing, list):
             bearing = [bearing] * len(vehID)
         if not isinstance(speed, list):
@@ -473,8 +995,8 @@ class METSRClient:
             private_veh = [private_veh] * len(vehID)
         if not isinstance(transform_coords, list):
             transform_coords = [transform_coords] * len(vehID)
-        for vehID, x, y, bearing, speed, private_veh, transform_coords in zip(vehID, x, y, bearing, speed, private_veh, transform_coords):
-            msg["DATA"].append({"vehID": vehID, "x": x, "y": y, "bearing": bearing, "speed": speed, "vehType": private_veh, "transformCoord": transform_coords})
+        for vehID, x, y, z, bearing, speed, private_veh, transform_coords in zip(vehID, x, y, z, bearing, speed, private_veh, transform_coords):
+            msg["DATA"].append({"vehID": vehID, "x": x, "y": y, "z": z, "bearing": bearing, "speed": speed, "vehType": private_veh, "transformCoord": transform_coords})
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] == "CTRL_teleportCoSimVeh", res["TYPE"]
         assert res["CODE"] == "OK", res["CODE"]
@@ -974,6 +1496,122 @@ class METSRClient:
         
         res = self.send_receive_msg(msg, ignore_heartbeats=True)
         assert res["TYPE"] == "CTRL_setSignalPhasePlanTicks", res["TYPE"]
+        return res
+
+
+    # Dynamically add one or more zones at given coordinates.
+    # x, y: map coordinates; z: elevation (default 0.0);
+    # capacity: zone capacity; zone_type: zone type int;
+    # transform_coord: set True if coords need network CRS transform.
+    # Returns assigned zone IDs.
+    def add_zone(self, x, y, capacity, zone_type, z=0.0, transform_coord=False):
+        msg = {"TYPE": "CTRL_addZone", "DATA": []}
+        if not isinstance(x, list):
+            x = [x]
+            y = [y]
+            z = [z]
+            capacity = [capacity]
+            zone_type = [zone_type]
+        if not isinstance(z, list):
+            z = [z] * len(x)
+        if not isinstance(transform_coord, list):
+            transform_coord = [transform_coord] * len(x)
+        assert len(x) == len(y) == len(z) == len(capacity) == len(zone_type), \
+            "x, y, z, capacity, and zone_type must have the same length"
+        for xi, yi, zi, cap, ztype, tc in zip(x, y, z, capacity, zone_type, transform_coord):
+            msg["DATA"].append({"x": xi, "y": yi, "z": zi, "transformCoord": tc, "capacity": cap, "type": ztype})
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_addZone", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
+
+    # Dynamically add one or more charging stations at given coordinates.
+    # num_l2/l3/bus: charger counts; price_l2/l3: per-unit prices;
+    # z: elevation (default 0.0);
+    # transform_coord: set True if coords need network CRS transform.
+    # Returns assigned (negative) station IDs.
+    def add_charging_station(self, x, y, num_l2, num_l3, num_bus, price_l2, price_l3, z=0.0, transform_coord=False):
+        msg = {"TYPE": "CTRL_addChargingStation", "DATA": []}
+        if not isinstance(x, list):
+            x = [x]
+            y = [y]
+            z = [z]
+            num_l2 = [num_l2]
+            num_l3 = [num_l3]
+            num_bus = [num_bus]
+            price_l2 = [price_l2]
+            price_l3 = [price_l3]
+        if not isinstance(z, list):
+            z = [z] * len(x)
+        if not isinstance(transform_coord, list):
+            transform_coord = [transform_coord] * len(x)
+        assert len(x) == len(y) == len(z) == len(num_l2) == len(num_l3) == len(num_bus) == len(price_l2) == len(price_l3), \
+            "All positional arguments must have the same length"
+        for xi, yi, zi, nl2, nl3, nbus, pl2, pl3, tc in zip(x, y, z, num_l2, num_l3, num_bus, price_l2, price_l3, transform_coord):
+            msg["DATA"].append({"x": xi, "y": yi, "z": zi, "transformCoord": tc,
+                                "numL2": nl2, "numL3": nl3, "numBus": nbus,
+                                "priceL2": pl2, "priceL3": pl3})
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_addChargingStation", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
+
+    # Spawn e-taxis parked at given zone(s).
+    # zoneID: zone ID or list of zone IDs; num: number of taxis to spawn per zone.
+    # Returns spawned vehicle IDs grouped by zone.
+    def add_taxi(self, zoneID, num):
+        msg = {"TYPE": "CTRL_addTaxi", "DATA": []}
+        if not isinstance(zoneID, list):
+            zoneID = [zoneID]
+        if not isinstance(num, list):
+            num = [num] * len(zoneID)
+        assert len(zoneID) == len(num), "zoneID and num must have the same length"
+        for zid, n in zip(zoneID, num):
+            msg["DATA"].append({"zoneID": zid, "num": n})
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_addTaxi", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
+
+    # Spawn e-buses on existing named route(s).
+    # routeName: route name or list of route names; num: buses to spawn per route.
+    # Returns spawned vehicle IDs grouped by route.
+    def add_bus(self, routeName, num):
+        msg = {"TYPE": "CTRL_addBus", "DATA": []}
+        if not isinstance(routeName, list):
+            routeName = [routeName]
+        if not isinstance(num, list):
+            num = [num] * len(routeName)
+        assert len(routeName) == len(num), "routeName and num must have the same length"
+        for rname, n in zip(routeName, num):
+            msg["DATA"].append({"routeName": rname, "num": n})
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_addBus", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
+        return res
+
+    # Command vehicle(s) to interrupt current activity and go charge.
+    # veh_type: True = private EV, False = public taxi.
+    # charger_type: ChargingStation.L2 / L3 / BUS.
+    # cs_id: 0 = auto-select nearest station; negative int = specific station ID.
+    # After charging the vehicle returns to its pre-charging destination.
+    def go_charging(self, vehID, veh_type, charger_type, cs_id=0):
+        msg = {"TYPE": "CTRL_goCharging", "DATA": []}
+        if not isinstance(vehID, list):
+            vehID = [vehID]
+        if not isinstance(veh_type, list):
+            veh_type = [veh_type] * len(vehID)
+        if not isinstance(charger_type, list):
+            charger_type = [charger_type] * len(vehID)
+        if not isinstance(cs_id, list):
+            cs_id = [cs_id] * len(vehID)
+        assert len(vehID) == len(veh_type) == len(charger_type) == len(cs_id), \
+            "vehID, veh_type, charger_type, and cs_id must have the same length"
+        for vid, vtype, ctype, csid in zip(vehID, veh_type, charger_type, cs_id):
+            msg["DATA"].append({"vehID": vid, "vehType": vtype, "chargerType": ctype, "csID": csid})
+        res = self.send_receive_msg(msg, ignore_heartbeats=True)
+        assert res["TYPE"] == "CTRL_goCharging", res["TYPE"]
+        assert res["CODE"] == "OK", res["CODE"]
         return res
      
     

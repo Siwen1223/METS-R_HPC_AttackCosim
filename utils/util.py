@@ -74,6 +74,8 @@ def modify_property_file(options, src_data_dir, dest_data_dir, port, instance, t
                 l = "V2X = false\n"  
         elif l.startswith("RH_DEMAND_FILE") and options.rh_demand_file is not None:
             l = "RH_DEMAND_FILE = " + str(options.rh_demand_file) + "\n"
+        elif l.startswith("ENABLE_JSON_WRITE"):
+            l = "ENABLE_JSON_WRITE = " + str(options.json_output).lower() + "\n"
         # elif l.startswith("ROADS_SHAPEFILE"):
         #     l = "ROADS_SHAPEFILE = data/NYC/facility/road/road_fileNYC.shp\n"
         # elif l.startswith("LANES_SHAPEFILE"):
@@ -91,7 +93,7 @@ def modify_property_file(options, src_data_dir, dest_data_dir, port, instance, t
         elif l.startswith("BT_STD_FILE") and options.bt_event_std_file:
             l = "BT_STD_FILE = " + options.bt_event_std_file + "\n"
         elif l.startswith("RH_WAITING_TIME") and options.rh_wait_file is not None:
-            l = "RH_WAITING_TIME =+ " + options.rh_wait_file + "\n"
+            l = "RH_WAITING_TIME = " + options.rh_wait_file + "\n"
         elif l.startswith("NUM_OF_EV"):
             l = "NUM_OF_EV = " + str(options.num_etaxi) + "\n"
         elif l.startswith("NUM_OF_BUS"):
@@ -214,9 +216,26 @@ def find_free_ports(options, num_simulations):
     time.sleep(1)
      
 # Read json format configuration 
-def read_run_config(fname):
+def _load_raw_config(fname):
+    """Recursively load a config JSON, merging parent_config fields first."""
+    fname = os.path.abspath(fname)
     with open(fname, "r") as f:
-        config = json.load(f, object_hook=lambda d: SimpleNamespace(**d))
+        raw = json.load(f)
+
+    if "parent_config" in raw:
+        parent_path = os.path.abspath(
+            os.path.join(os.path.dirname(fname), raw["parent_config"])
+        )
+        parent_raw = _load_raw_config(parent_path)
+        child_fields = {k: v for k, v in raw.items() if k != "parent_config"}
+        return {**parent_raw, **child_fields}
+
+    return raw
+
+
+def read_run_config(fname):
+    merged = _load_raw_config(fname)
+    config = SimpleNamespace(**merged)
 
     if len(config.random_seeds) != config.num_simulations:
        print("ERROR, please specify random seeds for all simulation instances")
