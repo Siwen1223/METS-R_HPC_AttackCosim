@@ -47,6 +47,7 @@ class CoSimClient(object):
             self.carla_private_flags = {}
             self.carla_handoff_locs = {}
             self.carla_handoff_yaws = {}
+            self.carla_spawn_pending = set()
 
             self.displayOnly_vehs = {} # id of agent and vehicle controlled by METSR, only used for display all vehicles
 
@@ -67,14 +68,15 @@ class CoSimClient(object):
             transform.rotation.pitch = -90
             spectator.set_transform(transform)
 
-      def set_custom_camera(self, x, y, z):
+      def set_custom_camera(self, x, y, z, yaw=-90, pitch=-90, roll=0):
             spectator = self.carla.get_spectator()
             transform = carla.Transform()
             transform.location.x = x
             transform.location.y = y
             transform.location.z = z
-            transform.rotation.yaw = -90
-            transform.rotation.pitch = -90
+            transform.rotation.yaw = yaw
+            transform.rotation.pitch = pitch
+            transform.rotation.roll = roll
             spectator.set_transform(transform)
 
       def get_carla_location(self, metsr_x, metsr_y):
@@ -149,7 +151,17 @@ class CoSimClient(object):
                         self.carla_handoff_locs[cosim_id] = self.get_carla_location(veh_info['x'], veh_info['y'])
                         _, handoff_yaw = self.get_carla_rotation(veh_info)
                         self.carla_handoff_yaws[cosim_id] = handoff_yaw
-                        self.spawn_carla_vehicle(cosim_id, private_flag, veh_info, display_only=False)
+                        spawned_actor = self.spawn_carla_vehicle(cosim_id, private_flag, veh_info, display_only=False)
+                        if spawned_actor is None:
+                              if cosim_id not in self.carla_spawn_pending:
+                                    handoff_loc = self.carla_handoff_locs[cosim_id]
+                                    print(
+                                          f"Vehicle {cosim_id} handoff delayed because CARLA could not spawn it "
+                                          f"at ({handoff_loc.x:.2f},{handoff_loc.y:.2f})."
+                                    )
+                              self.carla_spawn_pending.add(cosim_id)
+                              continue
+                        self.carla_spawn_pending.discard(cosim_id)
                         self.carla_coordMaps[cosim_id] = cosim_meta_map[cosim_id].get('coord_map', [])
                         self.carla_route[cosim_id] = cosim_meta_map[cosim_id].get('route', [])
                         route = self.carla_route[cosim_id]
@@ -191,29 +203,27 @@ class CoSimClient(object):
             spawn_point = carla.Transform(spawn_loc, tmp_rotation)
 
             blueprint = self.carla.get_blueprint_library().find('vehicle.audi.tt' if private_veh else 'vehicle.tesla.model3')
-            tmp_speed = max(min(veh_inform['speed'], 10), 5)
+            tmp_speed = 10  # veh_inform['speed']
             tmp_speed_x = tmp_speed * np.cos(tmp_yaw * np.pi / 180)
             tmp_speed_y = tmp_speed * np.sin(tmp_yaw * np.pi / 180)
-            if not display_only:
-                  print(
-                        f"[handoff] veh={vid} metsr_speed={veh_inform['speed']:.2f} "
-                        f"spawn_loc=({spawn_loc.x:.2f},{spawn_loc.y:.2f},{spawn_loc.z:.2f}) "
-                        f"spawn_yaw={tmp_yaw:.2f} "
-                        f"target_velocity=({tmp_speed_x:.2f},{tmp_speed_y:.2f})"
-                  )
 
             tmp_veh = self.carla.try_spawn_actor(blueprint, spawn_point)
-
             if tmp_veh:
+                  if not display_only:
+                        print(
+                              f"[handoff] veh={vid} metsr_speed={veh_inform['speed']:.2f} "
+                              f"spawn_loc=({spawn_loc.x:.2f},{spawn_loc.y:.2f},{spawn_loc.z:.2f}) "
+                              f"spawn_yaw={tmp_yaw:.2f} "
+                              f"target_velocity=({tmp_speed_x:.2f},{tmp_speed_y:.2f})"
+                        )
                   # Start each handoff from a neutral control state so the new physics actor does not
                   # inherit an arbitrary steering command before the CARLA-side controller takes over.
                   tmp_veh.apply_control(carla.VehicleControl(throttle=0.0, brake=0.0, steer=0.0))
                   tmp_veh.set_autopilot(False)
-                  #self.carla_tm.ignore_lights_percentage(tmp_veh, 100)
                   tmp_veh.set_target_velocity(carla.Vector3D(x=tmp_speed_x, y=tmp_speed_y, z=0))
 
                   if display_only:
-                        tmp_veh.set_simulate_physics(False) # Fix the bug of roll axis shaking
+                        tmp_veh.set_simulate_physics(False)  # Fix the bug of roll axis shaking
                         tmp_veh.set_autopilot(False)
                         self.displayOnly_vehs[vid] = tmp_veh
                   else:
@@ -221,6 +231,7 @@ class CoSimClient(object):
 
                   if vid in self.carla_veh_dataCollect:
                         self.deploy_vehicle_sensors(vid)
+            return tmp_veh
 
       def destroy_carla_vehicle(self, vid):
             if vid in self.carla_vehs:
@@ -237,6 +248,7 @@ class CoSimClient(object):
                   self.carla_private_flags.pop(vid, None)
                   self.carla_handoff_locs.pop(vid, None)
                   self.carla_handoff_yaws.pop(vid, None)
+                  self.carla_spawn_pending.discard(vid)
                   if vid in self.carla_waiting_vehs:
                         self.carla_waiting_vehs.remove(vid)
             if vid in self.displayOnly_vehs:
@@ -307,7 +319,10 @@ class CoSimClient(object):
                   # re-add the vehicle if it is removed by CARLA
                   print(f"Vehicle {vid} removed by CARLA, re-adding it.")
                   self.destroy_carla_vehicle(vid)
-                  self.spawn_carla_vehicle(vid, private_veh, veh_inform, display_only=False)
+                  spawned_actor = self.spawn_carla_vehicle(vid, private_veh, veh_inform, display_only=False)
+                  if spawned_actor is None:
+                        print(f"Vehicle {vid} respawn failed; skipping sync this tick.")
+                        return
                   carla_veh = self.carla_vehs[vid]
                   loc = carla_veh.get_location()
             vel = carla_veh.get_velocity()

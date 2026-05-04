@@ -34,6 +34,7 @@ expResult/
 
 # test
 test.py
+test.ipynb
 
 # examples under debugging
 examples/Save_and_load

@@ -38,8 +38,8 @@ class V2VControllerCarla:
         enable_overtake_lane_change=False,
         enable_debug_draw=False,
         v2v_position_mode="geodetic",
-        v2v_lat_key="latitude",
-        v2v_lon_key="longitude",
+        v2v_lat_key="true_x", #"latitude", latitude and longitude are noisy data.
+        v2v_lon_key="true_y", #"longitude",
         v2v_x_key="x",
         v2v_y_key="y",
     ):
@@ -299,7 +299,7 @@ class V2VControllerCarla:
         self.agent.set_target_speed(self._to_kmh(desired_speed))
         control = self.agent.run_step()
         local_planner = self.agent.get_local_planner()
-        target_wp = getattr(local_planner, "target_waypoint", None)
+        '''target_wp = getattr(local_planner, "target_waypoint", None)
         if target_wp is not None:
             target_loc = target_wp.transform.location
             print(
@@ -308,7 +308,7 @@ class V2VControllerCarla:
                 f"road={target_wp.road_id} lane={target_wp.lane_id}"
             )
         else:
-            print(f"[target-wp] veh={self.ego_vid} None")
+            print(f"[target-wp] veh={self.ego_vid} None")'''
 
         # Cache a compact summary so the outer script can print one-line debug state per vehicle.
         self._last_debug_state = {
