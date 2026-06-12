@@ -1,6 +1,9 @@
+"""Helper functions for METSR-SIM and METSR-HPC."""
+
 import socket
 import json
 import os
+import re
 import subprocess
 import time
 import shutil
@@ -15,11 +18,11 @@ from threading import Event
 from http.server import SimpleHTTPRequestHandler, HTTPServer
 from datetime import datetime
 
-"""
-Helper functions for METSR-SIM and METSR-HPC
-"""
 
-# Function for checking whether the socket connection is on
+# ---------------------------------------------------------------------------
+# Generic helpers
+# ---------------------------------------------------------------------------
+
 def check_socket(host, port):
     flag = True
     with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as sock:
@@ -30,22 +33,271 @@ def check_socket(host, port):
     time.sleep(1)
     return flag
 
-# Factory for processsing a str list with a given func
+
 def str_list_mapper_gen(func):
     def str_list_mapper(str_list):
         return [func(str) for str in str_list]
     return str_list_mapper
 
-# Function for modifying simulation properties
+
+def _is_sequence(value):
+    return isinstance(value, (list, tuple))
+
+
+def _as_list(value):
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return [value]
+
+
+def _broadcast(value, length):
+    if length == 1:
+        return [value]
+    if _is_sequence(value) and len(value) == length:
+        return list(value)
+    return [value] * length
+
+
+# ---------------------------------------------------------------------------
+# METSRClient payload helpers
+# ---------------------------------------------------------------------------
+
+VEHICLE_SENSOR_DSRC = 0
+VEHICLE_SENSOR_CV2X = 1
+VEHICLE_SENSOR_MOBILE_DEVICE = 2
+
+VEHICLE_SENSOR_TYPES = {
+    "dsrc": VEHICLE_SENSOR_DSRC,
+    "80211p": VEHICLE_SENSOR_DSRC,
+    "cv2x": VEHICLE_SENSOR_CV2X,
+    "c-v2x": VEHICLE_SENSOR_CV2X,
+    "c_v2x": VEHICLE_SENSOR_CV2X,
+    "mobile": VEHICLE_SENSOR_MOBILE_DEVICE,
+    "mobiledevice": VEHICLE_SENSOR_MOBILE_DEVICE,
+    "mobile_device": VEHICLE_SENSOR_MOBILE_DEVICE,
+    "mobile-device": VEHICLE_SENSOR_MOBILE_DEVICE,
+}
+
+REQUEST_ID_FIELDS = ("reqID", "requestID", "requestId", "ID", "id")
+REQUEST_ZONE_FIELDS = (
+    "zoneID",
+    "zoneId",
+    "zone",
+    "originZone",
+    "origZone",
+    "origin",
+    "orig",
+)
+
+
+def _request_id_from_record(record):
+    if not isinstance(record, dict):
+        return record
+    for key in REQUEST_ID_FIELDS:
+        value = record.get(key)
+        if value is not None:
+            return value
+    return None
+
+
+def _request_zone_from_record(record):
+    if not isinstance(record, dict):
+        return None
+    for key in REQUEST_ZONE_FIELDS:
+        value = record.get(key)
+        if value is None:
+            continue
+        if isinstance(value, dict):
+            nested_value = _request_zone_from_record(value)
+            if nested_value is not None:
+                return nested_value
+            continue
+        return value
+    return None
+
+
+def _normalize_sensor_type(sensor_type):
+    if isinstance(sensor_type, str):
+        key = sensor_type.strip().lower()
+        compact_key = key.replace(" ", "").replace("_", "").replace("-", "")
+        if key in VEHICLE_SENSOR_TYPES:
+            return VEHICLE_SENSOR_TYPES[key]
+        if compact_key in VEHICLE_SENSOR_TYPES:
+            return VEHICLE_SENSOR_TYPES[compact_key]
+        raise ValueError(
+            "Unknown sensorType. Use 0/'dsrc', 1/'cv2x', or 2/'mobile_device'."
+        )
+    return sensor_type
+
+
+def _looks_like_centerline(value):
+    if not _is_sequence(value) or len(value) == 0:
+        return False
+    first_point = value[0]
+    if not _is_sequence(first_point) or len(first_point) < 2:
+        return False
+    return not _is_sequence(first_point[0])
+
+
+def _set_road_reference(record, field_prefix, value):
+    if value is None:
+        return
+    if _is_sequence(value) and not isinstance(value, str):
+        record[field_prefix + "Roads"] = list(value)
+    else:
+        record[field_prefix + "Road"] = value
+
+
+# ---------------------------------------------------------------------------
+# Simulation property/config helpers
+# ---------------------------------------------------------------------------
+
+_PROPERTY_RE = re.compile(r"^(\s*)([A-Za-z0-9_]+)\s*=\s*(.*?)(\r?\n?)$")
+_MISSING = object()
+
+_PROPERTY_OPTION_ALIASES = {
+    "SIMULATION_STEP_SIZE": ("sim_step_size",),
+    "ENABLE_JSON_WRITE": ("json_output",),
+    "NUM_OF_EV": ("num_etaxi",),
+    "NUM_OF_BUS": ("num_ebus",),
+    "RH_SHARE_PERCENTAGE": ("rh_share_file",),
+    "RH_WAITING_TIME": ("rh_wait_file",),
+    "BT_STD_FILE": ("bt_event_std_file",),
+    "EV_DEMAND_FILE": ("private_ev_demand_file",),
+    "GV_DEMAND_FILE": ("private_gv_demand_file",),
+    "EV_CHARGING_PREFERENCE": ("private_ev_charging_preference",),
+}
+
+
+def _camel_to_snake(name):
+    """Return a config-friendly lowercase form for mixed-case property names."""
+    name = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", name)
+    name = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", name)
+    return name.lower()
+
+
+def _config_names_for_property(property_name):
+    names = [property_name.lower(), _camel_to_snake(property_name)]
+    names.extend(_PROPERTY_OPTION_ALIASES.get(property_name, ()))
+
+    deduped = []
+    for name in names:
+        if name not in deduped:
+            deduped.append(name)
+    return deduped
+
+
+def _get_option(options, name):
+    if isinstance(options, dict):
+        return options.get(name, _MISSING)
+    return getattr(options, name, _MISSING)
+
+
+def _first_option_value(options, names):
+    for name in names:
+        value = _get_option(options, name)
+        if value is not _MISSING and value is not None:
+            return True, value
+    return False, None
+
+
+def _format_property_value(value):
+    if isinstance(value, bool):
+        return str(value).lower()
+    return str(value)
+
+
+def _property_line(key, value, newline):
+    newline = newline or "\n"
+    return f"{key} = {_format_property_value(value)}{newline}"
+
+
+def _ensure_extension(value, extension):
+    value = str(value)
+    if value.lower().endswith(extension):
+        return value
+    return value + extension
+
+
+def _rewrite_data_path(line, src_data_dir):
+    if "data/" not in line:
+        return line
+    src_data_dir = src_data_dir.replace("\\", "/").rstrip("/")
+    return line.replace("data/", src_data_dir + "/")
+
+
+def _property_override_value(key, options, port, instance):
+    """Find the value that should be written for a Data.properties key.
+
+    Most properties are now mapped automatically from the lowercase key name
+    used in JSON configs, for example CAR_FOLLOWING_MODEL -> car_following_model.
+    Existing HPC config names are kept as aliases so old configs still work.
+    """
+    if key == "NETWORK_LISTEN_PORT":
+        return True, port
+    if key == "RANDOM_SEED":
+        found, seeds = _first_option_value(options, ("random_seeds",))
+        if found:
+            return True, seeds[instance]
+        return False, None
+    if key == "STANDALONE":
+        return True, False
+    if key == "SYNCHRONIZED":
+        return True, True
+    if key == "AGG_DEFAULT_PATH":
+        return True, "agg_output"
+    if key == "JSON_DEFAULT_PATH":
+        return True, "trajectory_output"
+
+    if key == "ZONES_SHAPEFILE":
+        found, value = _first_option_value(options, ("zones_shapefile",))
+        if found:
+            return True, value
+        found, value = _first_option_value(options, ("zone_file",))
+        if found:
+            return True, _ensure_extension(value, ".shp")
+    elif key == "ZONES_CSV":
+        found, value = _first_option_value(options, ("zones_csv",))
+        if found:
+            return True, value
+        found, value = _first_option_value(options, ("zone_file",))
+        if found:
+            return True, _ensure_extension(value, ".csv")
+    elif key == "CHARGER_SHAPEFILE":
+        found, value = _first_option_value(options, ("charger_shapefile",))
+        if found:
+            return True, value
+        found, value = _first_option_value(options, ("charging_station_file",))
+        if found:
+            return True, _ensure_extension(value, ".shp")
+    elif key == "CHARGER_CSV":
+        found, value = _first_option_value(options, ("charger_csv",))
+        if found:
+            return True, value
+        found, value = _first_option_value(options, ("charging_station_file",))
+        if found:
+            return True, _ensure_extension(value, ".csv")
+    elif key == "RH_DEMAND_SHARABLE":
+        found, value = _first_option_value(options, _config_names_for_property(key))
+        if found:
+            return True, value
+        found, _ = _first_option_value(options, ("rh_wait_file", "rh_waiting_time"))
+        if found:
+            return True, True
+        return False, None
+
+    return _first_option_value(options, _config_names_for_property(key))
+
+
+# ---------------------------------------------------------------------------
+# Simulation file preparation
+# ---------------------------------------------------------------------------
+
 def modify_property_file(options, src_data_dir, dest_data_dir, port, instance, template):
     fname = src_data_dir + "/Data.properties." + template
     if not path.exists(fname):
         print("ERROR, cannot find the property template file at ", fname)
         sys.exit(-1)
-
-    if options.template == "NYC":
-        scenario = options.scenario_index
-        case = options.case_index
 
     f = open(fname, "r")
     lines = f.readlines()
@@ -53,77 +305,13 @@ def modify_property_file(options, src_data_dir, dest_data_dir, port, instance, t
     fname = dest_data_dir + "/Data.properties"
     f_new = open(fname, "w")
     for l in lines:
-        if l.startswith("NETWORK_LISTEN_PORT"):
-            l = "NETWORK_LISTEN_PORT = " + str(port) + "\n"
-        elif (l.startswith("RANDOM_SEED")):
-            l = "RANDOM_SEED = " + str(options.random_seeds[instance]) + "\n"
-        elif (l.startswith("SIMULATION_STEP_SIZE")):
-            l = "SIMULATION_STEP_SIZE = " + str(options.sim_step_size) + "\n"
-        elif (l.startswith("AGG_DEFAULT_PATH")):
-            l = "AGG_DEFAULT_PATH = agg_output" + "\n"
-        elif (l.startswith("JSON_DEFAULT_PATH")):
-            l = "JSON_DEFAULT_PATH = trajectory_output" + "\n"
-        elif (l.startswith("STANDALONE")):
-            l = "STANDALONE = false\n"
-        elif (l.startswith("SYNCHRONIZED")):
-            l = "SYNCHRONIZED = true\n"
-        elif (l.startswith("V2X")):
-            if options.v2x:
-                l = "V2X = true\n"
-            else:
-                l = "V2X = false\n"  
-        elif l.startswith("RH_DEMAND_FILE") and options.rh_demand_file is not None:
-            l = "RH_DEMAND_FILE = " + str(options.rh_demand_file) + "\n"
-        elif l.startswith("ENABLE_JSON_WRITE"):
-            l = "ENABLE_JSON_WRITE = " + str(options.json_output).lower() + "\n"
-        # elif l.startswith("ROADS_SHAPEFILE"):
-        #     l = "ROADS_SHAPEFILE = data/NYC/facility/road/road_fileNYC.shp\n"
-        # elif l.startswith("LANES_SHAPEFILE"):
-        #     l = "LANES_SHAPEFILE = data/NYC/facility/road/lane_fileNYC.shp\n"
-        # elif l.startswith("ROADS_CSV"):
-        #         l = "ROADS_CSV = data/NYC/facility/road/road_fileNYC.csv\n"
-        # elif l.startswith("LANES_CSV"):
-        #     l = "LANES_CSV = data/NYC/facility/road/lane_fileNYC.csv\n"
-        elif l.startswith("NETWORK_FILE") and options.network_file is not None:
-            l = "NETWORK_FILE = " + str(options.network_file) + "\n"
-        elif l.startswith("RH_SHARE_PERCENTAGE") and options.rh_share_file is not None:
-            l = "RH_SHARE_PERCENTAGE = " + str(options.rh_share_file)+ "\n"
-        elif l.startswith("BT_EVENT_FILE") and options.bt_event_file is not None:
-            l = "BT_EVENT_FILE = " + options.bt_event_file+ "\n"
-        elif l.startswith("BT_STD_FILE") and options.bt_event_std_file:
-            l = "BT_STD_FILE = " + options.bt_event_std_file + "\n"
-        elif l.startswith("RH_WAITING_TIME") and options.rh_wait_file is not None:
-            l = "RH_WAITING_TIME = " + options.rh_wait_file + "\n"
-        elif l.startswith("NUM_OF_EV"):
-            l = "NUM_OF_EV = " + str(options.num_etaxi) + "\n"
-        elif l.startswith("NUM_OF_BUS"):
-            l = "NUM_OF_BUS = " + str(options.num_ebus) + "\n"
-        elif l.startswith("RH_DEMAND_SHARABLE") and options.rh_wait_file is not None:
-            l = "RH_DEMAND_SHARABLE = true \n"
-        elif l.startswith("RH_DEMAND_FACTOR"):
-            l = "RH_DEMAND_FACTOR = " + str(options.rh_demand_factor) + "\n"
-        elif (l.startswith("BUS_SCHEDULE")) and options.bus_schedule is not None:
-            l = "BUS_SCHEDULE = " +  str(options.bus_schedule) + "\n"
-        elif l.startswith("ZONES_SHAPEFILE"):
-            l = "ZONES_SHAPEFILE = " + str(options.zone_file) + ".shp\n"
-        elif l.startswith("ZONES_CSV"):
-            l = "ZONES_CSV = " + str(options.zone_file) + ".csv\n"
-        elif l.startswith("CHARGER_SHAPEFILE"):
-            l = "CHARGER_SHAPEFILE = " + str(options.charging_station_file) + ".shp\n"
-        elif l.startswith("CHARGER_CSV"):
-            l = "CHARGER_CSV = " + str(options.charging_station_file) + ".csv\n"
-        elif l.startswith("EV_DEMAND_FILE") and options.private_ev_demand_file is not None:
-            l = "EV_DEMAND_FILE = " + str(options.private_ev_demand_file) + "\n"
-        elif l.startswith("GV_DEMAND_FILE") and options.private_gv_demand_file is not None:
-            l = "GV_DEMAND_FILE = " + str(options.private_gv_demand_file) + "\n"
-        elif l.startswith("EV_CHARGING_PREFERENCE") and options.private_ev_charging_preference is not None:
-            l = "EV_CHARGING_PREFERENCE = " + str(options.private_ev_charging_preference) + "\n"
-        elif l.startswith("INITIAL_X"):
-            l = "INITIAL_X = " + str(options.initial_x) + "\n"
-        elif l.startswith("INITIAL_Y"):
-            l = "INITIAL_Y = " + str(options.initial_y) + "\n"
-        if "data/" in l:
-            l = l.replace('data/', src_data_dir + '/')
+        match = _PROPERTY_RE.match(l)
+        if match:
+            _, key, _, newline = match.groups()
+            found, value = _property_override_value(key, options, port, instance)
+            if found:
+                l = _property_line(key, value, newline)
+        l = _rewrite_data_path(l, src_data_dir)
         
         f_new.write(l)
     f_new.close()
@@ -196,7 +384,10 @@ def prepare_sim_dirs(options):
 #             options.cases[i].append(case.split("_")[1])
 #         i+=1
 
-# Functions for finding available port
+# ---------------------------------------------------------------------------
+# Port and config helpers
+# ---------------------------------------------------------------------------
+
 def find_free_ports(options, num_simulations):
     options.ports = []
     while True:
@@ -243,9 +434,10 @@ def read_run_config(fname):
 
     return config
 
-# Construct the java classpath with all the required jar files. 
-# If includeBin is False it won't add the METS_R/bin directory to classpath.
-# This is needed for simulation command.
+# ---------------------------------------------------------------------------
+# Java classpath helpers
+# ---------------------------------------------------------------------------
+
 def get_classpath(options, includeBin=True, separator=":"):
     
     classpath = ""
@@ -287,7 +479,10 @@ def get_classpath2(options, includeBin=True, separator=":"):
 
     return classpath
 
-# Function for starting the simulation
+# ---------------------------------------------------------------------------
+# Simulation launch helpers
+# ---------------------------------------------------------------------------
+
 def run_simulations(options):
     for i in range(0, options.num_simulations):
         cwd = str(os.getcwd())
@@ -380,6 +575,10 @@ def run_simulation_in_docker(options):
         # container_id = result.stdout.strip()
         os.chdir(cwd)
 
+# ---------------------------------------------------------------------------
+# Visualization server helpers
+# ---------------------------------------------------------------------------
+
 class CORSRequestHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, directory=None, **kwargs):
             self.custom_directory = directory
@@ -441,7 +640,177 @@ def stop_visualization_server(stop_event, server_thread, port=8000):
     server_thread.join()
     print("Visualization server stopped.")
 
-# Get the directory for storing simulation outputs
+
+# ---------------------------------------------------------------------------
+# Trajectory output helpers
+# ---------------------------------------------------------------------------
+
+def _read_property_values(properties_path):
+    values = {}
+    try:
+        with open(properties_path, "r") as properties_file:
+            for raw_line in properties_file:
+                line = raw_line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                values[key.strip()] = value.strip()
+    except OSError:
+        pass
+    return values
+
+
+def _read_trajectory_manifest(directory):
+    manifest_path = os.path.join(directory, "manifest.json")
+    try:
+        with open(manifest_path, "r") as manifest_file:
+            return json.load(manifest_file)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _resolve_trajectory_root(sim_folder, configured_path):
+    if not configured_path:
+        return None
+    configured_path = os.path.normpath(configured_path)
+    if os.path.isabs(configured_path):
+        return configured_path
+    return os.path.join(sim_folder, configured_path)
+
+
+def _configured_trajectory_roots(sim_folder):
+    properties = _read_property_values(os.path.join(sim_folder, "data", "Data.properties"))
+    roots = []
+    for key in ("TRAJECTORY_BINARY_DEFAULT_PATH", "JSON_DEFAULT_PATH"):
+        root = _resolve_trajectory_root(sim_folder, properties.get(key))
+        if root and root not in roots:
+            roots.append(root)
+
+    default_root = os.path.join(sim_folder, "trajectory_output")
+    if default_root not in roots:
+        roots.append(default_root)
+    return roots
+
+
+def _trajectory_format_score(directory):
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return 0
+
+    if "manifest.json" in names:
+        return 3
+    lowered = [name.lower() for name in names]
+    if any(name.endswith(".bin") for name in lowered):
+        return 2
+    if any(name.endswith(".json") for name in lowered):
+        return 1
+    return 0
+
+
+def _trajectory_format_name(directory):
+    manifest = _read_trajectory_manifest(directory)
+    if manifest is not None:
+        output_format = manifest.get("format", "binary")
+        version = manifest.get("version")
+        sparse_frame_groups = manifest.get("sparseFrameGroups") or []
+        sparse_suffix = " sparse" if sparse_frame_groups else ""
+        if version is not None:
+            return f"{output_format} v{version}{sparse_suffix}"
+        return f"{output_format}{sparse_suffix}"
+
+    score = _trajectory_format_score(directory)
+    if score >= 2:
+        return "binary"
+    if score == 1:
+        return "JSON"
+    return "trajectory"
+
+
+def _trajectory_manifest_summary(directory, manifest):
+    chunks = manifest.get("chunks", [])
+    active_chunk = manifest.get("activeChunk", {})
+    road_dictionary = manifest.get("roadIdDictionary", [])
+    zone_dictionary = manifest.get("zoneDictionary", [])
+    charging_station_dictionary = manifest.get("chargingStationDictionary", [])
+    schemas = manifest.get("schemas", {})
+    frame_groups = manifest.get("frameGroups", [])
+    sparse_frame_groups = manifest.get("sparseFrameGroups") or []
+    sparse_frame_group_mode = manifest.get("sparseFrameGroupMode")
+
+    return {
+        "directory": directory,
+        "manifest_path": os.path.join(directory, "manifest.json"),
+        "format": manifest.get("format"),
+        "version": manifest.get("version"),
+        "byte_order": manifest.get("byteOrder"),
+        "coord_scale": manifest.get("coordScale"),
+        "initial_x": manifest.get("initialX"),
+        "initial_y": manifest.get("initialY"),
+        "tick_interval": manifest.get("tickInterval"),
+        "link_snapshot_interval": manifest.get("linkSnapshotInterval"),
+        "chunk_tick_limit": manifest.get("chunkTickLimit"),
+        "chunk_count": len(chunks),
+        "active_chunk": active_chunk,
+        "road_count": len(road_dictionary),
+        "zone_count": len(zone_dictionary),
+        "charging_station_count": len(charging_station_dictionary),
+        "frame_groups": frame_groups,
+        "sparse_frame_groups": sparse_frame_groups,
+        "sparse_frame_group_mode": sparse_frame_group_mode,
+        "has_sparse_frame_groups": bool(sparse_frame_groups),
+        "has_sparse_zone_frames": "zone" in sparse_frame_groups,
+        "has_sparse_charging_station_frames": "chargingStation" in sparse_frame_groups,
+        "schema_names": sorted(schemas.keys()),
+        "has_zone_attributes": bool(zone_dictionary) or "zone" in schemas,
+        "has_charging_station_attributes": (
+            bool(charging_station_dictionary) or "chargingStation" in schemas
+        ),
+        "has_split_energy_fields": (
+            "frameHeader" in schemas
+            and any("energyPrivateEV" in field for field in schemas["frameHeader"])
+        ),
+    }
+
+
+def _latest_trajectory_directory(root, prefer_binary=True):
+    if root is None or not os.path.isdir(root):
+        return None
+
+    candidates = []
+    root_score = _trajectory_format_score(root)
+    if root_score > 0:
+        candidates.append((root_score, os.path.getmtime(root), root))
+
+    for name in os.listdir(root):
+        candidate = os.path.join(root, name)
+        if not os.path.isdir(candidate):
+            continue
+        score = _trajectory_format_score(candidate)
+        if score > 0:
+            candidates.append((score, os.path.getmtime(candidate), candidate))
+
+    if not candidates:
+        subdirs = [
+            os.path.join(root, name)
+            for name in os.listdir(root)
+            if os.path.isdir(os.path.join(root, name))
+        ]
+        if not subdirs:
+            return None
+        return max(subdirs, key=os.path.getmtime)
+
+    if prefer_binary:
+        binary_candidates = [candidate for candidate in candidates if candidate[0] >= 2]
+        if binary_candidates:
+            return max(binary_candidates, key=lambda item: item[1])[2]
+
+    return max(candidates, key=lambda item: item[1])[2]
+
+# ---------------------------------------------------------------------------
+# Simulation output path helpers
+# ---------------------------------------------------------------------------
+
 def get_sim_dir(options, i):
     sim_dir = "output/"+ options.name + "_" + datetime.now().strftime("%Y%m%d_%H%M%S") + "_seed_" + str(options.random_seeds[i])
     return sim_dir

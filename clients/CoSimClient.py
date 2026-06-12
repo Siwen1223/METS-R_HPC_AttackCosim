@@ -11,7 +11,7 @@ from queue import Queue
 from queue import Empty
 
 """
-Implementation of the CoSim Client
+An example of the implementation of the CoSim Client
 
 A CoSim client communicates with one METSRClient and one CARLA client to manage the 
 data flow between corresponding simulation instances.
@@ -30,9 +30,22 @@ class CoSimClient(object):
             # self.set_carla_camera(self.carla, config)
             self.set_overlook_camera(self.carla)
 
-            self.metsr = METSRClient(config.metsr_host, int(config.ports[0]), 0, self, verbose = config.verbose)
+            sim_folder = None
+            if getattr(config, "sim_dirs", None):
+                  sim_folder = config.sim_dirs[0]
+            else:
+                  sim_folder = getattr(config, "sim_folder", None)
 
-            self.display_all = config.display_all # display all the vehicles in the CARLA map
+            self.metsr = METSRClient(
+                  host=config.metsr_host,
+                  port=int(config.ports[0]),
+                  sim_folder=sim_folder,
+                  manager=self,
+                  timeout=getattr(config, "timeout", 30),
+                  verbose=getattr(config, "verbose", False),
+            )
+
+            self.display_all = getattr(config, "display_all", False) # display all the vehicles in the CARLA map
 
             # set the co-sim region - default to empty list if not specified
             metsr_roads = getattr(config, 'metsr_road', [])
@@ -57,6 +70,12 @@ class CoSimClient(object):
             self.carla_veh_sensors = {} # id of vehicle agents : sensor : sensor instances in CARLA belonging to this vehicle
             self.carla_veh_dataCollect = set() # id of vehicle agents whose sensor data will be collected
             self.carla_veh_sensor_queues = {} # id of vehicle agents : sensor : FIFO queue for storing sensor data
+
+      def __getattr__(self, name):
+            metsr = self.__dict__.get("metsr")
+            if metsr is not None and hasattr(metsr, name):
+                  return getattr(metsr, name)
+            raise AttributeError(f"{type(self).__name__!s} object has no attribute {name!r}")
 
       def set_overlook_camera(self, world): # set the camera to overlook the whole map
             spectator = world.get_spectator()
@@ -106,8 +125,7 @@ class CoSimClient(object):
       def is_in_carla_submap(self, x, y):
             # project x, y to the nearest road in CARLA and check if the road ID is in the co-sim road
             road_id = self.carla.get_map().get_waypoint(carla.Location(x, y), project_to_road=True, lane_type=(carla.LaneType.Driving)).road_id
-            #return True
-            return road_id in self.config.carla_road
+            return road_id in getattr(self.config, "carla_road", [])
             
       def step(self):
             """
@@ -328,11 +346,20 @@ class CoSimClient(object):
             vel = carla_veh.get_velocity()
             speed = (vel.x**2 + vel.y**2 + vel.z**2) ** 0.5
             bearing = self.get_metsr_rotation(carla_veh.get_transform().rotation.yaw)
-            self.metsr.teleport_cosim_vehicle(vid, loc.x, -loc.y, bearing, speed=speed, private_veh=private_veh, transform_coords=True)
+            self.metsr.teleport_cosim_vehicle(
+                  vehID=vid,
+                  x=loc.x,
+                  y=-loc.y,
+                  z=loc.z,
+                  bearing=bearing,
+                  speed=speed,
+                  private_veh=private_veh,
+                  transform_coords=True,
+            )
 
 
       def generate_random_trips(self, num_trips, start_vid = 0):
-            self.metsr.generate_trip(list(range(start_vid, start_vid+num_trips))) 
+            self.metsr.generate_trip(vehID=list(range(start_vid, start_vid+num_trips))) 
 
       def enable_vehicle_sensor(self, vid):
             self.carla_veh_dataCollect.add(vid)
@@ -462,3 +489,4 @@ class CoSimClient(object):
                 
 
             
+
