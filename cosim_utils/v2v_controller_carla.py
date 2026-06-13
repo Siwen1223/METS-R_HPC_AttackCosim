@@ -198,7 +198,11 @@ class V2VControllerCarla:
         """
         if not route_ids or self.path_planner is None:
             return False
-        lane_points = self.path_planner.build_lane_points(route_ids, start_point_carla=start_point_carla)
+        lane_points = self.path_planner.build_lane_points(
+            route_ids,
+            start_point_carla=start_point_carla,
+            start_yaw_carla=start_yaw_carla,
+        )
         if draw_plan:
             self.path_planner.draw_coarse_points()
             self.path_planner.draw_lane_points()
@@ -260,6 +264,9 @@ class V2VControllerCarla:
         # Gather the ego V2V state and the short CARLA path segment used for all downstream checks.
         ego_v2v = self._v2v_ego_record(data_stream)
         path_points = self._path_points()
+        if self._snap_to_next_path_point_if_needed(path_points):
+            ego_v2v = self._v2v_ego_record(data_stream)
+            path_points = self._path_points()
 
         # If a turn is coming up, try to move into the appropriate turn lane before the junction.
         self._lane_ensure_turn_alignment(ego_speed, ego_v2v, data_stream)
@@ -709,6 +716,46 @@ class V2VControllerCarla:
         if not points:
             points.append(self.vehicle.get_location())
         return points
+
+    def _snap_to_next_path_point_if_needed(self, path_points):
+        if len(path_points) < 2:
+            return False
+        current_loc = self.vehicle.get_location()
+        current_yaw = self.vehicle.get_transform().rotation.yaw
+        next_loc = path_points[0]
+        dist = current_loc.distance(next_loc)
+        if dist <= 1e-3 or dist >= 15.0:
+            return False
+
+        heading_rad = math.radians(current_yaw)
+        forward_x = math.cos(heading_rad)
+        forward_y = math.sin(heading_rad)
+        to_next_x = (next_loc.x - current_loc.x) / dist
+        to_next_y = (next_loc.y - current_loc.y) / dist
+        cos_angle = max(-1.0, min(1.0, forward_x * to_next_x + forward_y * to_next_y))
+        angle_deg = math.degrees(math.acos(cos_angle))
+        if angle_deg <= 60.0:
+            return False
+
+        next_next_loc = path_points[1]
+        seg_dx = next_next_loc.x - next_loc.x
+        seg_dy = next_next_loc.y - next_loc.y
+        if abs(seg_dx) < 1e-3 and abs(seg_dy) < 1e-3:
+            snap_yaw = current_yaw
+        else:
+            snap_yaw = math.degrees(math.atan2(seg_dy, seg_dx))
+
+        current_transform = self.vehicle.get_transform()
+        snapped_transform = carla.Transform(
+            carla.Location(x=next_loc.x, y=next_loc.y, z=next_loc.z),
+            carla.Rotation(
+                pitch=current_transform.rotation.pitch,
+                yaw=snap_yaw,
+                roll=current_transform.rotation.roll,
+            ),
+        )
+        self.vehicle.set_transform(snapped_transform)
+        return True
 
     def _path_waypoints(self, path_points):
         """
