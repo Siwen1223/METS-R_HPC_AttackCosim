@@ -39,3 +39,6 @@ test.ipynb
 
 # examples under debugging
 examples/Save_and_load
+
+# veins
+/veins_bridge/
