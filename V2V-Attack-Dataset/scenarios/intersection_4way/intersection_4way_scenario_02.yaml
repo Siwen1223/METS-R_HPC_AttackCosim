@@ -1,0 +1,56 @@
+scenario_id: "intersection_4way_scenario_02"
+name: "Town04 node53 intersection"
+
+town: "Town04"
+network_file: "data/CARLA/Town04/facility/road/Town04.net.xml"
+config_file: "configs/run_cosim_CARLAT4.json"
+intersection_center_xy_carla: [256.38, -247.68]
+
+roads:
+  north:
+    incoming: ["30"]
+    outgoing: ["-30"]
+  east:
+    incoming: ["-26"]
+    outgoing: ["26"]
+  south:
+    incoming: ["-29"]
+    outgoing: ["29"]
+  west:
+    incoming: ["27"]
+    outgoing: ["-27"]
+
+movements:
+  north_to_east: {origin: "30", destination: "26", maneuver: left_turn}
+  north_to_south: {origin: "30", destination: "29", maneuver: straight}
+  north_to_west: {origin: "30", destination: "-27", maneuver: right_turn}
+
+  east_to_south: {origin: "-26", destination: "29", maneuver: left_turn}
+  east_to_west: {origin: "-26", destination: "-27", maneuver: straight}
+  east_to_north: {origin: "-26", destination: "-30", maneuver: right_turn}
+
+  south_to_west: {origin: "-29", destination: "-27", maneuver: left_turn}
+  south_to_north: {origin: "-29", destination: "-30", maneuver: straight}
+  south_to_east: {origin: "-29", destination: "26", maneuver: right_turn}
+
+  west_to_north: {origin: "27", destination: "-30", maneuver: left_turn}
+  west_to_east: {origin: "27", destination: "26", maneuver: straight}
+  west_to_south: {origin: "27", destination: "29", maneuver: right_turn}
+
+cosim_roads:
+  - "-30"
+  - "-29"
+  - "-27"
+  - "-26"
+  - "26"
+  - "27"
+  - "29"
+  - "30"
+
+traffic_lights:
+  enabled: false
+
+right_of_way:
+  type: unsignalized
+
+notes: ""

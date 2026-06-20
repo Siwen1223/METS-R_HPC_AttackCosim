@@ -15,6 +15,7 @@ _out/*
 out_*/
 runs/
 expResult/
+V2V-Attack-Dataset/runs/
 
 # Logs
 *.log
