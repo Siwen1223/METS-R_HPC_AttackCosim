@@ -382,7 +382,7 @@ class CoSimClient(object):
             lidar_bp.set_attribute('dropoff_general_rate', '0.0')
             lidar_bp.set_attribute('dropoff_intensity_limit', '1.0')
             lidar_bp.set_attribute('dropoff_zero_intensity', '0.0')
-            lidar_bp.set_attribute('upper_fov', str(30))
+            lidar_bp.set_attribute('upper_fov', str(15))
             lidar_bp.set_attribute('lower_fov', str(-25))
             lidar_bp.set_attribute('channels', str(64.0))
             lidar_bp.set_attribute('range', str(100))

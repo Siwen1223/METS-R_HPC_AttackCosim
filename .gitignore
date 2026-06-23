@@ -36,6 +36,7 @@ V2V-Attack-Dataset/runs/
 # test
 test.py
 test.ipynb
+test*
 .codex
 
 # examples under debugging
