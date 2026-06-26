@@ -25,6 +25,28 @@ def vehicle_id(record):
     return record.get("ID", record.get("vehicle_id", record.get("vid")))
 
 
+def _config_value(config, names, default=None):
+    for name in names:
+        if isinstance(config, Mapping) and name in config:
+            return config[name]
+        if config is not None and hasattr(config, name):
+            return getattr(config, name)
+    return default
+
+
+def _same_vehicle_id(left, right):
+    return str(left) == str(right)
+
+
+def _xy_distance_m(first, second):
+    try:
+        dx = float(first.get("x")) - float(second.get("x"))
+        dy = float(first.get("y")) - float(second.get("y"))
+    except (TypeError, ValueError):
+        return None
+    return (dx * dx + dy * dy) ** 0.5
+
+
 def normalize_vehicle(record, private_veh=False, role="vehicle", map_name=None):
     return {
         "ID": vehicle_id(record),
@@ -273,15 +295,26 @@ class CV2XManager:
         require_simu5g_uu=True,
         duration_s=None,
         payload_bytes=300,
+        communication_range_m=None,
     ):
         self.config = config
         self.veins = veins_client or VeinsClient(config=config, host=host, port=port)
         self.require_simu5g_uu = require_simu5g_uu
         self.duration_s = duration_s if duration_s is not None else getattr(config, "sim_step_size", 0.1)
         self.payload_bytes = payload_bytes
+        self.communication_range_m = float(
+            communication_range_m
+            if communication_range_m is not None
+            else _config_value(
+                config,
+                ("cv2x_communication_range_m", "cv2x_range_m", "communication_range_m"),
+                500.0,
+            )
+        )
         self.last_result = {}
         self.last_rows = []
         self.last_stream = []
+        self.last_streams_by_receiver = {}
 
     def close(self):
         if self.veins is not None:
@@ -298,6 +331,8 @@ class CV2XManager:
             for receiver in vehicles:
                 receiver_id = vehicle_id(receiver)
                 if receiver_id is None or receiver_id == sender_id:
+                    continue
+                if not self._within_communication_range(sender, receiver):
                     continue
                 sequence += 1
                 messages.append(
@@ -325,6 +360,8 @@ class CV2XManager:
     ):
         messages = []
         for sequence, receiver in enumerate(receivers, start=1):
+            if not self._within_communication_range(ghost_vehicle, receiver):
+                continue
             messages.append(
                 make_bsm_message(
                     tick=tick,
@@ -349,7 +386,7 @@ class CV2XManager:
         result = self.veins.sync_tick(
             tick=tick,
             vehicles=build_mobility_records(vehicles),
-            bsm_messages=messages,
+            bsm_messages=bridge_messages,
             attacks=attacks or [],
             duration_s=self.duration_s,
         )
@@ -365,6 +402,7 @@ class CV2XManager:
             row["phase"] = phase
         self.last_result = result
         self.last_rows = rows
+        self.last_streams_by_receiver = self.controller_streams_by_receiver(vehicles, rows)
         self.last_stream = self.controller_stream(vehicles, rows)
         return result, rows, self.last_stream
 
@@ -375,6 +413,37 @@ class CV2XManager:
                 continue
             stream.append(self._row_to_controller_record(row))
         return [record for record in stream if record.get("vid") is not None]
+
+    def controller_streams_by_receiver(self, vehicles, rows=None):
+        streams = {}
+        for vehicle in vehicles:
+            vid = vehicle_id(vehicle)
+            if vid is None:
+                continue
+            record = self._vehicle_to_controller_record(vehicle)
+            if record.get("vid") is not None:
+                streams[vid] = [record]
+
+        for row in rows or []:
+            if not row.get("delivered"):
+                continue
+            receiver_id = row.get("target_vehicle_id")
+            if receiver_id is None:
+                continue
+            record = self._row_to_controller_record(row)
+            if record.get("vid") is None:
+                continue
+            for stream_vid in list(streams):
+                if _same_vehicle_id(stream_vid, receiver_id):
+                    streams[stream_vid].append(record)
+                    break
+        return streams
+
+    def _within_communication_range(self, sender, receiver):
+        distance = _xy_distance_m(sender, receiver)
+        if distance is None:
+            return False
+        return distance <= self.communication_range_m
 
     @staticmethod
     def _vehicle_to_controller_record(vehicle):
