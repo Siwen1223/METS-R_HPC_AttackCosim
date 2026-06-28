@@ -746,4 +746,7 @@ class CV2XManager:
             "speed_mps": speed,
             "heading": heading,
             "heading_deg": heading,
+            "attacked": row.get("attacked", False),
+            "attack_id": row.get("attack_id", ""),
+            "attack_type": row.get("attack_type", ""),
         }

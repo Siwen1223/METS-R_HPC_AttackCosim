@@ -1,5 +1,7 @@
 """Shared helpers for co-simulation scripts."""
 
+import os
+import random
 import socket
 
 import yaml
@@ -9,6 +11,37 @@ def is_port_open(port, host="127.0.0.1", timeout=0.5):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.settimeout(timeout)
         return sock.connect_ex((host, int(port))) == 0
+
+
+def set_random_seed(seed, config=None, traffic_manager=None):
+    seed = int(seed)
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    random.seed(seed)
+
+    try:
+        import numpy as np
+
+        np.random.seed(seed)
+    except Exception:
+        pass
+
+    '''try:
+        import torch
+
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+    except Exception:
+        pass'''
+
+    if config is not None:
+        num_simulations = int(getattr(config, "num_simulations", 1) or 1)
+        config.random_seeds = [seed for _ in range(num_simulations)]
+
+    if traffic_manager is not None and hasattr(traffic_manager, "set_random_device_seed"):
+        traffic_manager.set_random_device_seed(seed)
+
+    return seed
 
 
 def load_scenario(path):

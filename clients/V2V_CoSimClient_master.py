@@ -5,6 +5,7 @@ from pathlib import Path
 from clients.CoSimClient import CoSimClient
 from cosim_utils.C_V2X_manager import CV2XManager, normalize_vehicle
 from cosim_utils.Sensor_manager import SensorManager
+from cosim_utils.cosim_pathplanner import CosimPathPlanner
 from cosim_utils.v2v_controller_carla import V2VControllerCarla
 from utils.carla_util import release_ready_cosim_vehicles_from_queue
 
@@ -39,6 +40,7 @@ class V2VCoSimClientMaster(CoSimClient):
         self.last_v2x_result = {}
         self.enable_v2x = enable_v2x
         self.ghost_attacks = []
+        self.handoff_path_planner = None
         self.carla_tick_timeout = float(getattr(config, "carla_tick_timeout", 5.0))
         self.metsr_tick_timeout = float(getattr(config, "metsr_tick_timeout", 5.0))
         self.release_queued_cosim_vehicles = bool(
@@ -188,8 +190,22 @@ class V2VCoSimClientMaster(CoSimClient):
                 if cosim_id in self.displayOnly_vehs:
                     print(f"Vehicle {cosim_id} switched from display-only to CARLA-managed.")
                     self.destroy_carla_vehicle(cosim_id)
-                self.carla_handoff_locs[cosim_id] = self.get_carla_location(veh_info["x"], veh_info["y"])
+                self.carla_coordMaps[cosim_id] = cosim_meta_map[cosim_id].get("coord_map", [])
+                self.carla_route[cosim_id] = cosim_meta_map[cosim_id].get("route", [])
+                route = self.carla_route[cosim_id]
+                self.carla_destRoad[cosim_id] = route[-1] if route else None
+                handoff_loc = self.get_carla_location(veh_info["x"], veh_info["y"])
                 _, handoff_yaw = self.get_carla_rotation(veh_info)
+                route_handoff = self._route_handoff_pose(route, handoff_loc)
+                if route_handoff is not None:
+                    handoff_loc, handoff_yaw, lane_path = route_handoff
+                    if getattr(self.config, "verbose", False):
+                        print(
+                            f"[handoff-route] veh={cosim_id} route={route} "
+                            f"lane_path={lane_path} "
+                            f"spawn=({handoff_loc.x:.2f},{handoff_loc.y:.2f}) yaw={handoff_yaw:.2f}"
+                        )
+                self.carla_handoff_locs[cosim_id] = handoff_loc
                 self.carla_handoff_yaws[cosim_id] = handoff_yaw
                 spawned_actor = self.spawn_carla_vehicle(cosim_id, private_flag, veh_info, display_only=False)
                 if spawned_actor is None:
@@ -202,10 +218,6 @@ class V2VCoSimClientMaster(CoSimClient):
                     self.carla_spawn_pending.add(cosim_id)
                     continue
                 self.carla_spawn_pending.discard(cosim_id)
-                self.carla_coordMaps[cosim_id] = cosim_meta_map[cosim_id].get("coord_map", [])
-                self.carla_route[cosim_id] = cosim_meta_map[cosim_id].get("route", [])
-                route = self.carla_route[cosim_id]
-                self.carla_destRoad[cosim_id] = route[-1] if route else None
                 self.carla_entered[cosim_id] = True
                 print(f"Vehicle {cosim_id} entered the co-sim ownership set and is now CARLA-managed.")
 
@@ -216,6 +228,19 @@ class V2VCoSimClientMaster(CoSimClient):
 
         if self.display_all:
             self.sync_display_only_vehicles(current_cosim_ids)
+
+    def _route_handoff_pose(self, route_ids, reference_loc):
+        if not route_ids:
+            return None
+        net_path = getattr(self.config, "network_file", None)
+        if not net_path:
+            return None
+        if self.handoff_path_planner is None:
+            self.handoff_path_planner = CosimPathPlanner(self.carla, str(Path(net_path).resolve()))
+        return self.handoff_path_planner.route_handoff_pose(
+            route_ids,
+            reference_carla_location=reference_loc,
+        )
 
     def _vehicle_for_sensor(self, vid):
         return self.carla_vehs.get(vid) or self.displayOnly_vehs.get(vid)
@@ -271,6 +296,11 @@ class V2VCoSimClientMaster(CoSimClient):
                 self.route_synced[vid] = True
                 if getattr(self.config, "enable_debug_draw", False) and controller.path_planner is not None:
                     controller.path_planner.draw_lane_points()
+            elif route_ids and getattr(self.config, "verbose", False):
+                print(
+                    f"WARNING: failed to sync CARLA route for veh={vid}; "
+                    f"route={route_ids}, start=({start_loc.x:.2f},{start_loc.y:.2f}), yaw={start_yaw:.2f}"
+                )
 
     def _apply_controller_controls(self):
         for vid, controller in list(self.controllers.items()):
@@ -352,8 +382,19 @@ class V2VCoSimClientMaster(CoSimClient):
             self.last_v2x_result = {}
             return {}
 
-        extra_messages = list(extra_v2x_messages or [])
+        extra_injection = self._resolve_extra_v2x(extra_v2x_messages, vehicles)
+        extra_messages = list(extra_injection.get("messages", []))
+        extra_vehicles = list(extra_injection.get("vehicles", []))
         mobility_vehicles = list(vehicles)
+        for vehicle in extra_vehicles:
+            mobility_vehicles.append(
+                normalize_vehicle(
+                    vehicle,
+                    private_veh=True,
+                    role=vehicle.get("role", "v2x_attacker"),
+                    map_name=getattr(self.config, "carla_map", None),
+                )
+            )
         for attack in self.ghost_attacks:
             if not self._attack_active(attack, self.current_tick):
                 continue
@@ -386,6 +427,23 @@ class V2VCoSimClientMaster(CoSimClient):
             "stream": stream,
             "streams_by_receiver": self.last_v2x_streams,
         }
+
+    def _resolve_extra_v2x(self, extra_v2x_messages, vehicles):
+        if extra_v2x_messages is None:
+            return {"messages": [], "vehicles": [], "events": []}
+        if callable(extra_v2x_messages):
+            extra_v2x_messages = extra_v2x_messages(
+                self,
+                tick=self.current_tick,
+                vehicles=vehicles,
+            )
+        if isinstance(extra_v2x_messages, dict):
+            return {
+                "messages": list(extra_v2x_messages.get("messages", extra_v2x_messages.get("v2x_messages", [])) or []),
+                "vehicles": list(extra_v2x_messages.get("vehicles", extra_v2x_messages.get("mobility_vehicles", [])) or []),
+                "events": list(extra_v2x_messages.get("events", [])) or [],
+            }
+        return {"messages": list(extra_v2x_messages or []), "vehicles": [], "events": []}
 
     @staticmethod
     def _attack_active(attack, tick):

@@ -19,10 +19,11 @@ class CosimPathPlanner:
     3. sample those lane centerlines into a dense CARLA route for the controller.
     """
 
-    def __init__(self, world, net_path, half_road_width=3.5, sampling_resolution=2.0):
+    def __init__(self, world, net_path, half_road_width=3.5, sampling_resolution=2.0, gap_trace_threshold=5.0):
         self.world = world
         self.map = world.get_map() if world is not None else None
         self.half_road_width = half_road_width
+        self.gap_trace_threshold = float(gap_trace_threshold)
         self.net_path = Path(net_path)
         (
             self.edges,
@@ -84,25 +85,54 @@ class CosimPathPlanner:
             return []
 
         self.selected_lane_path = lane_path
-        lane_points_metsr = self._sample_lane_path(lane_path, self._carla_to_metsr(start_point_carla))
-        if not lane_points_metsr:
+        lane_points_carla = self._sample_lane_path_locations(
+            lane_path,
+            self._carla_to_metsr(start_point_carla),
+        )
+        if not lane_points_carla:
             return []
 
         self.coarse_points_metsr = self._build_route_markers_from_lane_path(lane_path)
         self.coarse_points_carla = [self._metsr_to_carla(point) for point in self.coarse_points_metsr]
 
-        lane_points_carla = []
         self.lane_waypoints = []
-        for point in lane_points_metsr:
-            loc = self._metsr_to_carla(point)
+        route_points = []
+        for loc in lane_points_carla:
             if self.map is not None:
                 wp = self.map.get_waypoint(loc, project_to_road=True, lane_type=carla.LaneType.Driving)
                 if wp is not None:
-                    lane_points_carla.append(wp.transform.location)
+                    route_points.append(wp.transform.location)
                     self.lane_waypoints.append((wp, None))
                     continue
-            lane_points_carla.append(loc)
-        return self._dedupe_locations(lane_points_carla)
+            route_points.append(loc)
+        return self._dedupe_locations(route_points)
+
+    def route_handoff_pose(self, route_ids, reference_carla_location=None):
+        """
+        Choose a route-compatible starting lane and project the handoff pose onto that lane.
+        Inputs: METS-R edge route and optional current CARLA handoff location.
+        Outputs: Returns (CARLA location, CARLA yaw, lane path) or None.
+        """
+        route_ids = [str(route_id) for route_id in route_ids if str(route_id) in self.edges]
+        if not route_ids:
+            return None
+        reference_metsr = self._carla_to_metsr(reference_carla_location) if reference_carla_location is not None else None
+        lane_path = self._select_route_lane_path(route_ids, reference_metsr=reference_metsr)
+        if not lane_path:
+            return None
+
+        lane = self.lanes[lane_path[0]]
+        shape = lane["shape_metsr"]
+        if len(shape) < 2:
+            return None
+        if reference_metsr is not None:
+            _, point_metsr, seg_idx, seg_t = self._distance_to_polyline(reference_metsr, shape)
+        else:
+            point_metsr = shape[0]
+            seg_idx = 0
+            seg_t = 0.0
+        yaw = self._segment_yaw_carla(shape, seg_idx, seg_t)
+        return self._metsr_to_carla(point_metsr), yaw, lane_path
 
     def build_carla_routepoints_from_metsr(self, route_ids, centerline_response, sampling_locs=(0.2, 0.5, 0.8)):
         """
@@ -286,6 +316,9 @@ class CosimPathPlanner:
             )
             if path_to_first is None:
                 continue
+            full_path = self._build_lane_path(lane_id, route_ids)
+            if not full_path:
+                continue
             hop_penalty = 2.0 * self._count_noninternal_transitions(path_to_first)
             score = distance + 0.08 * heading_error + hop_penalty
             candidates.append((score, lane_id))
@@ -293,6 +326,29 @@ class CosimPathPlanner:
             return None
         candidates.sort(key=lambda item: item[0])
         return candidates[0][1]
+
+    def _select_route_lane_path(self, route_ids, reference_metsr=None):
+        first_edge = self.edges.get(str(route_ids[0]))
+        if first_edge is None:
+            return []
+        candidates = []
+        for lane_id in first_edge["driving_lane_ids"]:
+            lane_path = self._build_lane_path(lane_id, route_ids)
+            if not lane_path:
+                continue
+            distance = 0.0
+            if reference_metsr is not None:
+                distance, _, _, _ = self._distance_to_polyline(reference_metsr, self.lanes[lane_id]["shape_metsr"])
+            path_length = sum(
+                self.lanes[path_lane_id]["length"]
+                for path_lane_id in lane_path
+                if path_lane_id in self.lanes
+            )
+            candidates.append((distance, path_length, self.lanes[lane_id]["index"], lane_path))
+        if not candidates:
+            return []
+        candidates.sort(key=lambda item: (item[0], item[1], item[2]))
+        return list(candidates[0][3])
 
     def _build_lane_path(self, start_lane_id, route_ids):
         lane_path = [start_lane_id]
@@ -394,8 +450,9 @@ class CosimPathPlanner:
                 heappush(heap, (next_cost, next_lane_id, next_path))
         return None
 
-    def _sample_lane_path(self, lane_path, start_point_metsr, step=2.0):
-        polylines = []
+    def _sample_lane_path_locations(self, lane_path, start_point_metsr, step=2.0):
+        locations = []
+        previous_end = None
         for idx, lane_id in enumerate(lane_path):
             shape = list(self.lanes[lane_id]["shape_metsr"])
             if len(shape) < 2:
@@ -404,16 +461,38 @@ class CosimPathPlanner:
                 shape = self._clip_polyline_from_point(shape, start_point_metsr)
             if len(shape) < 2:
                 continue
-            if polylines and self._points_close(polylines[-1][-1], shape[0]):
-                shape = shape[1:]
-            if shape:
-                polylines.append(shape)
-        if not polylines:
-            return []
-        merged = polylines[0]
-        for shape in polylines[1:]:
-            merged.extend(shape)
-        return self._resample_polyline(merged, step=step)
+
+            if previous_end is not None:
+                gap = self._distance_2d(previous_end, shape[0])
+                if gap > self.gap_trace_threshold and self.grp is not None:
+                    self._append_grp_gap_locations(locations, previous_end, shape[0])
+                elif gap > 1e-3:
+                    self._append_metsr_locations(
+                        locations,
+                        self._resample_polyline([previous_end, shape[0]], step=step),
+                    )
+
+            self._append_metsr_locations(locations, self._resample_polyline(shape, step=step))
+            previous_end = shape[-1]
+        return locations
+
+    def _append_metsr_locations(self, locations, points):
+        for point in points:
+            self._append_location(locations, self._metsr_to_carla(point))
+
+    def _append_grp_gap_locations(self, locations, start_point_metsr, end_point_metsr):
+        start_loc = self._metsr_to_carla(start_point_metsr)
+        end_loc = self._metsr_to_carla(end_point_metsr)
+        segment = self.grp.trace_route(start_loc, end_loc)
+        if not segment:
+            self._append_location(locations, end_loc)
+            return
+        for waypoint, _ in segment:
+            self._append_location(locations, waypoint.transform.location)
+
+    def _append_location(self, locations, loc, eps=0.3):
+        if not locations or loc.distance(locations[-1]) > eps:
+            locations.append(loc)
 
     def _build_route_markers_from_lane_path(self, lane_path):
         markers = []

@@ -98,6 +98,15 @@ class CoSimClient(object):
             transform.rotation.roll = roll
             spectator.set_transform(transform)
 
+      def set_unsignalized_intersection_lights(self, state=None, freeze=True):
+            if state is None:
+                  state = carla.TrafficLightState.Yellow
+            traffic_lights = list(self.carla.get_actors().filter("traffic.traffic_light*"))
+            for traffic_light in traffic_lights:
+                  traffic_light.set_state(state)
+                  traffic_light.freeze(bool(freeze))
+            return len(traffic_lights)
+
       def get_carla_location(self, metsr_x, metsr_y):
             # given x, y, find the corresponding z values and rotation in CARLA
             x, y = metsr_x, -metsr_y
@@ -217,7 +226,12 @@ class CoSimClient(object):
       
       def spawn_carla_vehicle(self, vid, private_veh, veh_inform, display_only=False):
             tmp_rotation, tmp_yaw = self.get_carla_rotation(veh_inform)
-            spawn_loc = self.get_carla_location(veh_inform['x'], veh_inform['y'])
+            spawn_loc = self.carla_handoff_locs.get(vid)
+            if spawn_loc is None:
+                  spawn_loc = self.get_carla_location(veh_inform['x'], veh_inform['y'])
+            if vid in self.carla_handoff_yaws:
+                  tmp_yaw = self.carla_handoff_yaws[vid]
+                  tmp_rotation = carla.Rotation(pitch=0.0, yaw=tmp_yaw, roll=0.0)
             spawn_point = carla.Transform(spawn_loc, tmp_rotation)
 
             blueprint = self.carla.get_blueprint_library().find('vehicle.audi.tt' if private_veh else 'vehicle.tesla.model3')
@@ -489,4 +503,3 @@ class CoSimClient(object):
                 
 
             
-
