@@ -405,6 +405,7 @@ class SybilAttack(V2XAttack):
         attacker = _state_by_id(vehicles, self.attacker_vehicle_id)
         if attacker is None:
             return {"messages": [], "vehicles": [], "events": []}
+        receivers = [vehicle for vehicle in vehicles if not _same_id(vehicle_id(vehicle), self.attacker_vehicle_id)]
         messages = []
         fake_vehicles = []
         for index, offset in enumerate(self.offsets_xy[: self.sybil_count], start=1):
@@ -421,7 +422,7 @@ class SybilAttack(V2XAttack):
                     cv2x,
                     tick,
                     fake,
-                    vehicles,
+                    receivers,
                     attack_id=self.attack_id,
                     attack_type=self.attack_type,
                     content=f"sybil BSM {index}",
