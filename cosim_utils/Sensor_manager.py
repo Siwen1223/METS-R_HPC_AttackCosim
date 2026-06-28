@@ -141,7 +141,6 @@ class SensorManager:
         output_path = output_path or self.output_path
         for name, queue in self.queues.get(vid, {}).items():
             if not self._should_sample(name, tick):
-                self._drain(queue)
                 continue
             data = self._latest(queue)
             if data is None:

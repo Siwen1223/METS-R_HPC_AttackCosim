@@ -31,6 +31,23 @@ def _state_by_id(vehicles, vid):
     return None
 
 
+def next_available_vehicle_id(existing_ids, count=1):
+    numeric_ids = []
+    for vid in existing_ids or []:
+        try:
+            numeric_ids.append(int(vid))
+        except (TypeError, ValueError):
+            continue
+    start = max(numeric_ids, default=0) + 1
+    if int(count) <= 1:
+        return start
+    return list(range(start, start + int(count)))
+
+
+def vehicle_ids_from_states(vehicles):
+    return [vehicle_id(vehicle) for vehicle in vehicles or [] if vehicle_id(vehicle) is not None]
+
+
 def _heading_forward_xy(heading_deg):
     heading = math.radians(_to_float(heading_deg))
     return math.sin(heading), math.cos(heading)
@@ -202,7 +219,7 @@ class StaticGhostVehicleAttack(V2XAttack):
     def __init__(
         self,
         target_vehicle_id,
-        ghost_id=900001,
+        ghost_id=None,
         scenario_type="intersection",
         route_points=None,
         coordinate_frame="carla",
@@ -219,6 +236,8 @@ class StaticGhostVehicleAttack(V2XAttack):
         self._ghost_state = None
 
     def generate(self, *, cosim_client, cv2x, tick, vehicles, dt):
+        if self.ghost_id is None:
+            self.ghost_id = next_available_vehicle_id(vehicle_ids_from_states(vehicles))
         if self._ghost_state is None:
             route_points = self.route_points or _controller_route_points(cosim_client, self.target_vehicle_id)
             self._ghost_state = self._build_ghost_state(cosim_client, route_points)
@@ -281,7 +300,7 @@ class StaticGhostVehicleAttack(V2XAttack):
 class ObstacleGhostVehicleAttack(V2XAttack):
     attack_type = "obstacle_ghost_vehicle"
 
-    def __init__(self, target_vehicle_id, ghost_id=900002, lead_time_s=0.0, base_distance_m=13.0, ghost_speed_mps=2.0, **kwargs):
+    def __init__(self, target_vehicle_id, ghost_id=None, lead_time_s=0.0, base_distance_m=13.0, ghost_speed_mps=2.0, **kwargs):
         super().__init__(**kwargs)
         self.target_vehicle_id = target_vehicle_id
         self.ghost_id = ghost_id
@@ -293,6 +312,8 @@ class ObstacleGhostVehicleAttack(V2XAttack):
         target = _state_by_id(vehicles, self.target_vehicle_id)
         if target is None:
             return {"messages": [], "vehicles": [], "events": []}
+        if self.ghost_id is None:
+            self.ghost_id = next_available_vehicle_id(vehicle_ids_from_states(vehicles))
         heading = _to_float(target.get("bearing", target.get("heading_deg")))
         ghost = self._ghost_state_from_target(target, heading)
         messages = _attack_messages(
@@ -390,7 +411,7 @@ class SybilAttack(V2XAttack):
         attacker_vehicle_id,
         sybil_count=5,
         offsets_xy=None,
-        base_sybil_id=910000,
+        base_sybil_id=None,
         limiter=None,
         **kwargs,
     ):
@@ -398,18 +419,24 @@ class SybilAttack(V2XAttack):
         self.attacker_vehicle_id = attacker_vehicle_id
         self.sybil_count = int(sybil_count)
         self.offsets_xy = list(offsets_xy or [(10.0, 0.0), (20.0, 0.0), (-10.0, 0.0), (0.0, -5.0), (10.0, -5.0)])
-        self.base_sybil_id = int(base_sybil_id)
+        self.base_sybil_id = None if base_sybil_id is None else int(base_sybil_id)
         self.limiter = limiter or KinematicLimiter()
 
     def generate(self, *, cosim_client, cv2x, tick, vehicles, dt):
         attacker = _state_by_id(vehicles, self.attacker_vehicle_id)
         if attacker is None:
             return {"messages": [], "vehicles": [], "events": []}
+        if self.base_sybil_id is None:
+            sybil_ids = next_available_vehicle_id(
+                vehicle_ids_from_states(vehicles),
+                count=self.sybil_count,
+            )
+            self.base_sybil_id = sybil_ids[0] if isinstance(sybil_ids, list) else sybil_ids
         receivers = [vehicle for vehicle in vehicles if not _same_id(vehicle_id(vehicle), self.attacker_vehicle_id)]
         messages = []
         fake_vehicles = []
         for index, offset in enumerate(self.offsets_xy[: self.sybil_count], start=1):
-            fake_id = self.base_sybil_id + index
+            fake_id = self.base_sybil_id + index - 1
             fake = dict(attacker)
             fake["ID"] = fake_id
             fake["role"] = "sybil_attacker"
@@ -439,7 +466,7 @@ class ReplayAttack(V2XAttack):
         replay_name=None,
         replay_path=None,
         records=None,
-        replay_sender_id=920000,
+        replay_sender_id=None,
         loop=True,
         use_limiter=True,
         limiter=None,
@@ -457,6 +484,8 @@ class ReplayAttack(V2XAttack):
         record = self._record_for_tick(tick)
         if record is None:
             return {"messages": [], "vehicles": [], "events": []}
+        if self.replay_sender_id is None:
+            self.replay_sender_id = next_available_vehicle_id(vehicle_ids_from_states(vehicles))
         sender = self._record_to_vehicle(record, cosim_client)
         if self.limiter is not None:
             sender = self.limiter.apply(f"replay:{self.replay_sender_id}", sender, float(dt))
@@ -526,6 +555,39 @@ class ReplayAttack(V2XAttack):
             with path.open("r", encoding="utf-8", newline="") as file_obj:
                 return list(csv.DictReader(file_obj))
         return []
+
+
+def assign_attack_vehicle_ids(attack, existing_vehicle_ids):
+    """Assign compact fake sender IDs for one attack or a list of attacks."""
+    if isinstance(attack, (list, tuple)):
+        used_ids = list(existing_vehicle_ids)
+        for item in attack:
+            _assign_one_attack_vehicle_id(item, used_ids)
+        return attack
+    return _assign_one_attack_vehicle_id(attack, list(existing_vehicle_ids))
+
+
+def _assign_one_attack_vehicle_id(attack, used_ids):
+    if isinstance(attack, FalseInformationInjectionAttack):
+        return attack
+    if isinstance(attack, (StaticGhostVehicleAttack, ObstacleGhostVehicleAttack)):
+        if attack.ghost_id is None:
+            attack.ghost_id = next_available_vehicle_id(used_ids)
+            used_ids.append(attack.ghost_id)
+        return attack
+    if isinstance(attack, ReplayAttack):
+        if attack.replay_sender_id is None:
+            attack.replay_sender_id = next_available_vehicle_id(used_ids)
+            used_ids.append(attack.replay_sender_id)
+        return attack
+    if isinstance(attack, SybilAttack):
+        if attack.base_sybil_id is None:
+            ids = next_available_vehicle_id(used_ids, count=attack.sybil_count)
+            ids = ids if isinstance(ids, list) else [ids]
+            attack.base_sybil_id = ids[0]
+            used_ids.extend(ids)
+        return attack
+    return attack
 
 
 class V2XAttackManager:

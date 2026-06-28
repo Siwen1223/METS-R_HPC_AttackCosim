@@ -79,7 +79,8 @@ class DatasetSaver:
         for row in rows or []:
             core_data = row.get("bsm_core_data") or {}
             summary = {
-                "tick": row.get("tick", tick),
+                "tick": tick,
+                "source_tick": row.get("tick"),
                 "sim_time": sim_time,
                 "message_id": row.get("message_id"),
                 "sender_id": row.get("sender_id"),
@@ -101,7 +102,8 @@ class DatasetSaver:
             if receiver_id is None:
                 continue
             vehicle_record = {
-                "tick": row.get("tick", tick),
+                "tick": tick,
+                "source_tick": row.get("tick"),
                 "sim_time": sim_time,
                 "sender_id": row.get("sender_id"),
                 "receiver_id": receiver_id,
