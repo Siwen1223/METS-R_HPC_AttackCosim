@@ -19,7 +19,7 @@ from utils.carla_util import open_carla
 from clients.CoSimClient import CoSimClient
 from clients.KafkaDataProcessor import KafkaDataProcessor
 from clients.KafkaDataSender import KafkaDataSender
-# from cosim_utils.run_data_saver import RunDataSaver
+# from cosim_utils.dataset_saver import DatasetSaver
 from cosim_utils.v2v_controller_carla import V2VControllerCarla
 from tools.derive_carla_roads_from_metsr import derive_carla_road_from_metsr
 
@@ -203,7 +203,7 @@ if __name__ == "__main__":
     #     "vehicle_ids": controller_vids,
     #     "sensor_vehicle_ids": vehicle_with_sensors,
     # }
-    # data_saver = RunDataSaver(dataset_root, meta_info, attack_info, sensor_every_n=5)
+    # data_saver = DatasetSaver(dataset_root, meta_info, attack_info, sensor_every_n=5)
     # data_saver.log_event(0.0, "Simulation started")
 
     def init_controller_for_vid(vid):

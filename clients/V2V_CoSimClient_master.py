@@ -38,6 +38,7 @@ class V2VCoSimClientMaster(CoSimClient):
         self.last_v2x_streams = {}
         self.last_v2x_rows = []
         self.last_v2x_result = {}
+        self.last_controls = {}
         self.enable_v2x = enable_v2x
         self.ghost_attacks = []
         self.handoff_path_planner = None
@@ -51,7 +52,9 @@ class V2VCoSimClientMaster(CoSimClient):
             self.carla,
             self._vehicle_for_sensor,
             output_path=getattr(config, "sensor_output_path", "_out"),
-            camera_layout=camera_layout or getattr(config, "camera_layout", "front"),
+            camera_layout=camera_layout or getattr(config, "camera_layout", "front_rear"),
+            camera_interval_ticks=getattr(config, "camera_interval_ticks", 5),
+            lidar_interval_ticks=getattr(config, "lidar_interval_ticks", 10),
         )
         self.cv2x = cv2x_manager or CV2XManager(
             config=config,
@@ -87,15 +90,13 @@ class V2VCoSimClientMaster(CoSimClient):
         self._sync_controller_routes()
         done_vids = self._finish_completed_routes()
         v2x_payload = self._sync_v2x(extra_v2x_messages=extra_v2x_messages, phase=phase)
-        self.sensor_manager.collect_sensor_data(
-            output_path=getattr(self.config, "sensor_output_path", None)
-        )
         self.step_index += 1
         return {
             "tick": self.current_tick,
             "done_vids": done_vids,
             "v2x": v2x_payload,
             "controllers": self.controllers,
+            "controls": dict(self.last_controls),
         }
 
     def run(self, max_steps=None):
@@ -115,6 +116,9 @@ class V2VCoSimClientMaster(CoSimClient):
 
     def close(self):
         try:
+            if hasattr(self, "sensor_manager"):
+                for vid in list(self.sensor_manager.sensors):
+                    self.sensor_manager.destroy_vehicle_sensors(vid)
             self.cv2x.close()
         finally:
             self.metsr.terminate()
@@ -135,11 +139,11 @@ class V2VCoSimClientMaster(CoSimClient):
         if hasattr(self, "sensor_manager"):
             self.sensor_manager.destroy_vehicle_sensors(vid)
 
-    def collect_sensor_data(self, output_path=None):
-        self.sensor_manager.collect_sensor_data(output_path=output_path)
+    def collect_sensor_data(self, output_path=None, tick=None):
+        self.sensor_manager.collect_sensor_data(output_path=output_path, tick=tick)
 
-    def save_sensor_data(self, vid, output_path=None):
-        self.sensor_manager.save_sensor_data(vid, output_path=output_path)
+    def save_sensor_data(self, vid, output_path=None, tick=None):
+        self.sensor_manager.save_sensor_data(vid, output_path=output_path, tick=tick)
 
     def _carla_tick(self):
         try:
@@ -303,6 +307,7 @@ class V2VCoSimClientMaster(CoSimClient):
                 )
 
     def _apply_controller_controls(self):
+        self.last_controls = {}
         for vid, controller in list(self.controllers.items()):
             carla_vehicle = self.carla_vehs.get(vid)
             if carla_vehicle is None or not self.carla_entered.get(vid, False):
@@ -311,6 +316,7 @@ class V2VCoSimClientMaster(CoSimClient):
                 continue
             control = controller.run_step(self.last_v2x_streams.get(vid, []), dt=self.dt)
             carla_vehicle.apply_control(control)
+            self.last_controls[vid] = control
 
     def _finish_completed_routes(self):
         done_vids = []

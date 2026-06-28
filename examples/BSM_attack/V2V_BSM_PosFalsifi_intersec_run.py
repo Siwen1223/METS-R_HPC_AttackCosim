@@ -21,7 +21,7 @@ from clients.CoSimClient import CoSimClient
 from clients.KafkaDataProcessor import KafkaDataProcessor
 from clients.KafkaDataSender import KafkaDataSender
 from cosim_utils.v2v_controller_carla import V2VControllerCarla
-from cosim_utils.run_data_saver import RunDataSaver
+from cosim_utils.dataset_saver import DatasetSaver
 
 import subprocess
 import signal
@@ -172,7 +172,7 @@ if __name__ == '__main__':
         "max_steps": max_steps,
         "planned_duration_sec": max_steps * dt,
     }
-    data_saver = RunDataSaver(dataset_root, meta_info, attack_info, sensor_every_n=5)
+    data_saver = DatasetSaver(dataset_root, meta_info, attack_info, sensor_every_n=5)
     data_saver.log_event(0.0, "Simulation started")
 
     def init_controller_for_vid(vid):

@@ -1,6 +1,6 @@
 """CARLA vehicle sensor deployment and data capture helpers."""
 
-import os
+from pathlib import Path
 from queue import Empty, Queue
 
 import numpy as np
@@ -26,11 +26,21 @@ CAMERA_LAYOUTS = {
 class SensorManager:
     """Manage RGB cameras and LiDAR attached to CARLA vehicles."""
 
-    def __init__(self, world, vehicle_lookup, output_path="_out", camera_layout="front"):
+    def __init__(
+        self,
+        world,
+        vehicle_lookup,
+        output_path="_out",
+        camera_layout="front_rear",
+        camera_interval_ticks=5,
+        lidar_interval_ticks=10,
+    ):
         self.world = world
         self.vehicle_lookup = vehicle_lookup
         self.output_path = output_path
         self.camera_layout = camera_layout
+        self.camera_interval_ticks = int(camera_interval_ticks)
+        self.lidar_interval_ticks = int(lidar_interval_ticks)
         self.enabled_vids = set()
         self.sensors = {}
         self.queues = {}
@@ -64,6 +74,7 @@ class SensorManager:
         camera_bp.set_attribute("image_size_x", "800")
         camera_bp.set_attribute("image_size_y", "600")
         camera_bp.set_attribute("fov", "110")
+        camera_bp.set_attribute("sensor_tick", "0.5")
 
         lidar_bp = bp_lib.filter("sensor.lidar.ray_cast")[0]
         lidar_bp.set_attribute("dropoff_general_rate", "0.0")
@@ -75,6 +86,7 @@ class SensorManager:
         lidar_bp.set_attribute("range", "100")
         lidar_bp.set_attribute("points_per_second", "100000")
         lidar_bp.set_attribute("noise_stddev", "0.02")
+        lidar_bp.set_attribute("sensor_tick", "1.0")
 
         self.sensors[vid] = {}
         self.queues[vid] = {}
@@ -108,42 +120,64 @@ class SensorManager:
         self.sensors.pop(vid, None)
         self.queues.pop(vid, None)
 
-    def collect_sensor_data(self, output_path=None):
-        for vid in list(self.enabled_vids):
-            self.save_sensor_data(vid, output_path=output_path)
+    def enable_vehicles(self, vids, deploy_now=True):
+        for vid in vids:
+            self.enable_vehicle(vid, deploy_now=deploy_now)
 
-    def save_sensor_data(self, vid, output_path=None):
+    def deploy_enabled_sensors(self):
+        for vid in list(self.enabled_vids):
+            self.deploy_vehicle_sensors(vid)
+
+    def collect_sensor_data(self, tick=None, output_path=None):
+        for vid in list(self.enabled_vids):
+            self.save_sensor_data(vid, tick=tick, output_path=output_path)
+
+    def save_sensor_data(self, vid, tick=None, output_path=None):
+        if output_path is None and isinstance(tick, (str, Path)):
+            output_path = tick
+            tick = None
         if vid not in self.sensors:
             return
         output_path = output_path or self.output_path
         for name, queue in self.queues.get(vid, {}).items():
+            if not self._should_sample(name, tick):
+                self._drain(queue)
+                continue
             data = self._latest(queue)
             if data is None:
-                print(f"[Warning] Some {name} data for vehicle {vid} has been missed")
                 continue
             if name.startswith("camera_"):
-                self._save_camera(vid, name, data, output_path)
+                self._save_camera(vid, name, data, output_path, tick=tick)
             elif name == "lidar":
-                self._save_lidar(vid, data, output_path)
+                self._save_lidar(vid, data, output_path, tick=tick)
 
-    def _save_camera(self, vid, name, image_data, output_path):
+    def _save_camera(self, vid, name, image_data, output_path, tick=None):
         image_array = np.copy(np.frombuffer(image_data.raw_data, dtype=np.dtype("uint8")))
         image_array = np.reshape(image_array, (image_data.height, image_data.width, 4))
         image_array = image_array[:, :, :3][:, :, ::-1]
         image = Image.fromarray(image_array)
-        folder = os.path.join(output_path, str(vid), name)
-        os.makedirs(folder, exist_ok=True)
-        image.save(os.path.join(folder, f"im{image_data.frame:08d}.png"))
+        camera_name = name.replace("camera_", "", 1)
+        folder = Path(output_path) / f"vehicle_{vid}" / "camera" / camera_name
+        folder.mkdir(parents=True, exist_ok=True)
+        frame_id = int(tick) if tick is not None else int(image_data.frame)
+        image.save(folder / f"{frame_id:08d}.png")
 
-    def _save_lidar(self, vid, lidar_data, output_path):
+    def _save_lidar(self, vid, lidar_data, output_path, tick=None):
         cloud = np.copy(np.frombuffer(lidar_data.raw_data, dtype=np.dtype("f4")))
         cloud = np.reshape(cloud, (len(lidar_data), 4))
-        folder = os.path.join(output_path, str(vid), "lidar")
-        os.makedirs(folder, exist_ok=True)
+        folder = Path(output_path) / f"vehicle_{vid}" / "lidar"
+        folder.mkdir(parents=True, exist_ok=True)
+        frame_id = int(tick) if tick is not None else int(lidar_data.frame)
         np.savez_compressed(
-            os.path.join(folder, f"lidar_{lidar_data.frame:08d}.npz"),
+            folder / f"{frame_id:08d}.npz",
             lidar=cloud,
         )
+
+    def _should_sample(self, name, tick):
+        if tick is None:
+            return True
+        interval = self.lidar_interval_ticks if name == "lidar" else self.camera_interval_ticks
+        return interval <= 1 or int(tick) % interval == 0
 
     @staticmethod
     def _latest(queue):
