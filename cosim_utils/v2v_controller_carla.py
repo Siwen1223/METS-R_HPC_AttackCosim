@@ -46,6 +46,9 @@ class V2VControllerCarla:
         path_block_max_speed_mps=2.0,
         path_block_static_speed_mps=0.3,
         path_block_stop_buffer=7.0,
+        curve_speed_cap_mps=7.5,
+        curve_lookahead_m=25.0,
+        curve_turn_threshold_deg=35.0,
         lane_change_lookahead_s=4.0,
         enable_overtake_lane_change=False,
         enable_debug_draw=False,
@@ -88,6 +91,9 @@ class V2VControllerCarla:
         self.path_block_max_speed_mps = path_block_max_speed_mps
         self.path_block_static_speed_mps = path_block_static_speed_mps
         self.path_block_stop_buffer = path_block_stop_buffer
+        self.curve_speed_cap_mps = curve_speed_cap_mps
+        self.curve_lookahead_m = curve_lookahead_m
+        self.curve_turn_threshold_deg = curve_turn_threshold_deg
         self.lane_change_lookahead_s = lane_change_lookahead_s
         self.enable_overtake_lane_change = enable_overtake_lane_change
         self.enable_debug_draw = enable_debug_draw
@@ -288,6 +294,8 @@ class V2VControllerCarla:
         # Gather ego state directly from CARLA and the short path segment used for V2V checks.
         ego_v2v = self._ego_state_record(data_stream)
         path_points = self._path_points()
+        attack_influenced_speed = False
+        attack_influence_source = ""
         if self._snap_to_next_path_point_if_needed(path_points):
             ego_v2v = self._ego_state_record(data_stream)
             path_points = self._path_points()
@@ -299,36 +307,50 @@ class V2VControllerCarla:
         lead = self._decision_lead_vehicle(ego_v2v, data_stream)
         if lead is not None:
             # A lead vehicle means the ego should follow IDM dynamics instead of using only spacing.
-            desired_speed = min(desired_speed, self._decision_speed_from_gap(ego_speed, lead, dt))
+            lead_speed = min(desired_speed, self._decision_speed_from_gap(ego_speed, lead, dt))
+            if lead_speed < desired_speed - 1e-3 and (lead["vehicle"] or {}).get("attacked", False):
+                attack_influenced_speed = True
+                attack_influence_source = "lead_vehicle"
+            desired_speed = lead_speed
 
         # Catch stationary or very slow V2V objects that occupy the planned path, including inside junctions.
         path_blocker = self._decision_path_blocking_vehicle(ego_v2v, data_stream, path_points)
         if path_blocker is not None:
             if path_blocker["speed"] <= self.path_block_static_speed_mps:
-                desired_speed = min(
+                blocker_speed = min(
                     desired_speed,
                     self._decision_speed_to_path_blocker(path_blocker["distance"]),
                 )
             else:
-                desired_speed = min(
+                blocker_speed = min(
                     desired_speed,
                     self._decision_speed_from_gap(ego_speed, path_blocker, dt),
                 )
+            if blocker_speed < desired_speed - 1e-3 and (path_blocker["vehicle"] or {}).get("attacked", False):
+                attack_influenced_speed = True
+                attack_influence_source = "path_blocker"
+            desired_speed = blocker_speed
 
         # Check for the most relevant crossing vehicle and reduce speed if a time-critical conflict exists.
         conflict = self._decision_conflict_vehicle(ego_v2v, data_stream, path_points, ego_speed)
         if conflict is not None and conflict["speed_factor"] < 1.0:
             # A crossing conflict means we taper toward a stop before the conflict point.
-            desired_speed = min(
+            conflict_speed = min(
                 desired_speed,
                 ego_speed * conflict["speed_factor"],
                 self._decision_speed_to_conflict_point(conflict["distance"]),
             )
+            if conflict_speed < desired_speed - 1e-3 and (conflict["vehicle"] or {}).get("attacked", False):
+                attack_influenced_speed = True
+                attack_influence_source = "crossing_conflict"
+            desired_speed = conflict_speed
 
         # Before entering a junction, stop or slow if another truly intersecting flow is already occupying it.
-        junction_blocked = self._decision_junction_blocked(ego_v2v, data_stream, path_points)
+        junction_blocker = self._decision_junction_blocked(ego_v2v, data_stream, path_points)
+        junction_blocked = junction_blocker is not None
         junction_entry_dist = self._path_distance_to_junction_entry(path_points) if junction_blocked else None
         if junction_blocked:
+            before_junction_speed = desired_speed
             if junction_entry_dist is None:
                 # Fallback: if we cannot estimate a stop line distance, use a full stop.
                 desired_speed = 0.0
@@ -338,11 +360,19 @@ class V2VControllerCarla:
                     desired_speed,
                     self._decision_speed_to_stop_line(junction_entry_dist),
                 )
+            if desired_speed < before_junction_speed - 1e-3 and (junction_blocker or {}).get("attacked", False):
+                attack_influenced_speed = True
+                attack_influence_source = "junction_blocker"
 
         # Optionally try an overtaking lane change if a slow lead vehicle is blocking progress.
         if self.enable_overtake_lane_change:
             # Only consider overtaking when this optional behavior is enabled by the scenario.
             self._lane_try_overtake(lead, ego_v2v, data_stream)
+
+        # Cap speed before sharp upcoming turns so the PID follower can stay on the lane centerline.
+        curve_speed_cap = self._decision_curve_speed_cap(path_points)
+        if curve_speed_cap is not None:
+            desired_speed = min(desired_speed, curve_speed_cap)
 
         # Hand the final speed target to BasicAgent and let it generate the low-level CARLA control.
         self.agent.set_target_speed(self._to_kmh(desired_speed))
@@ -375,7 +405,11 @@ class V2VControllerCarla:
             "conflict_ego_time": conflict["ego_time"] if conflict is not None else None,
             "conflict_other_time": conflict["other_time"] if conflict is not None else None,
             "junction_blocked": junction_blocked,
+            "junction_blocker_vid": junction_blocker.get("vid") if junction_blocker is not None else None,
             "junction_entry_distance": junction_entry_dist,
+            "curve_speed_cap": curve_speed_cap,
+            "attack_influenced_speed": attack_influenced_speed,
+            "attack_influence_source": attack_influence_source,
             "path_point_count": len(path_points),
             "control_throttle": control.throttle,
             "control_brake": control.brake,
@@ -576,10 +610,10 @@ class V2VControllerCarla:
         """
         Check whether a true crossing vehicle is already occupying or about to occupy the ego junction path.
         Inputs: Ego V2V record, full V2V data stream, and ego path points.
-        Outputs: Returns True if the junction should be treated as blocked, otherwise False.
+        Outputs: Returns the blocking V2V record if blocked, otherwise None.
         """
         if ego_v2v is None or len(path_points) < 2:
-            return False
+            return None
 
         ego_wp = self.map.get_waypoint(
             self.vehicle.get_location(),
@@ -587,11 +621,11 @@ class V2VControllerCarla:
             lane_type=carla.LaneType.Driving,
         )
         if ego_wp is None or ego_wp.is_junction:
-            return False
+            return None
 
         junction_points = self._path_junction_points(path_points)
         if len(junction_points) < 2:
-            return False
+            return None
 
         ego_heading = ego_v2v.get("heading", 0.0)
         for other_v2v in self._v2v_other_records(data_stream):
@@ -617,8 +651,8 @@ class V2VControllerCarla:
             if other_wp is None:
                 continue
             if other_wp.is_junction or conflict_state["other_dist"] < self.junction_yield_radius:
-                return True
-        return False
+                return other_v2v
+        return None
 
     def _decision_speed_from_gap(self, ego_speed, lead, dt):
         """
@@ -1016,6 +1050,39 @@ class V2VControllerCarla:
             if wp is not None and wp.is_junction:
                 return distance
             prev_loc = loc
+        return None
+
+    def _decision_curve_speed_cap(self, path_points):
+        """
+        Return a speed cap when the upcoming path bends sharply within the near lookahead window.
+        Inputs: Upcoming CARLA path locations.
+        Outputs: Speed cap in m/s, or None when no curve cap is needed.
+        """
+        if len(path_points) < 3 or self.curve_speed_cap_mps <= 0.0:
+            return None
+
+        points = [self.vehicle.get_location()] + path_points
+        prev_loc = points[0]
+        prev_heading = None
+        traveled = 0.0
+        cumulative_turn = 0.0
+
+        for loc in points[1:]:
+            segment = prev_loc.distance(loc)
+            if segment < 0.2:
+                continue
+            traveled += segment
+            heading = math.atan2(loc.y - prev_loc.y, loc.x - prev_loc.x)
+            if prev_heading is not None:
+                delta = abs((heading - prev_heading + math.pi) % (2.0 * math.pi) - math.pi)
+                cumulative_turn += delta
+                if math.degrees(cumulative_turn) >= self.curve_turn_threshold_deg:
+                    return self.curve_speed_cap_mps
+            if traveled >= self.curve_lookahead_m:
+                break
+            prev_heading = heading
+            prev_loc = loc
+
         return None
 
     def _route_draw_points(self):

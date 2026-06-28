@@ -24,21 +24,21 @@ from utils.util import prepare_sim_dirs, read_run_config, run_simulation_in_dock
 
 
 DEFAULT_SCENARIO_PATH = (
-    ROOT_DIR / "V2V-Attack-Dataset/scenarios/intersection_4way/intersection_4way_scenario_01.yaml"
+    ROOT_DIR / "V2V-Attack-Dataset/scenarios/intersection_4way/intersection_4way_scenario_03.yaml"
 )
-DEFAULT_OUTPUT_DIR = ROOT_DIR / "V2V-Attack-Dataset/replay_records/intersection_4way"
-DEFAULT_MOVEMENT = "west_to_north"
+DEFAULT_OUTPUT_ROOT = ROOT_DIR / "V2V-Attack-Dataset/replay_records/intersection_4way"
+DEFAULT_MOVEMENT = "south_to_west"
 DEFAULT_VEHICLE_ID = 1
-DEFAULT_CAMERA_HEIGHT = 180
+DEFAULT_CAMERA_HEIGHT = 80
 
 # Edit these values directly before running this script.
 SCENARIO_PATH = DEFAULT_SCENARIO_PATH
 MOVEMENT_NAME = DEFAULT_MOVEMENT
 VEHICLE_ID = DEFAULT_VEHICLE_ID
-MAX_STEPS = 260
+MAX_STEPS = 500
 WARMUP_STEPS = 10
-TARGET_SPEED_MPS = 10.0
-OUTPUT_DIR = DEFAULT_OUTPUT_DIR
+TARGET_SPEED_MPS = 5.0
+OUTPUT_DIR = None
 OUTPUT_NAME = None
 REUSE_METSR = False
 
@@ -161,7 +161,7 @@ def main():
     config = configure_run(scenario, TARGET_SPEED_MPS)
     config.controller_vids = [VEHICLE_ID]
 
-    output_dir = Path(OUTPUT_DIR).resolve()
+    output_dir = Path(OUTPUT_DIR).resolve() if OUTPUT_DIR is not None else DEFAULT_OUTPUT_ROOT / scenario_path.stem
     output_name = OUTPUT_NAME or f"{MOVEMENT_NAME}.jsonl"
     output_path = output_dir / output_name
     meta_path = output_path.with_suffix(".meta.json")

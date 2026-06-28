@@ -2,15 +2,15 @@
   "record_type": "intersection_replay_bsm_trajectory",
   "scenario_id": "intersection_4way_scenario_01",
   "scenario_path": "/home/siwen/Software/METS-R_docker/METS-R_HPC/V2V-Attack-Dataset/scenarios/intersection_4way/intersection_4way_scenario_01.yaml",
-  "movement": "north_to_south",
-  "maneuver": "straight",
-  "origin": "-47",
-  "destination": "-40",
+  "movement": "south_to_west",
+  "maneuver": "left_turn",
+  "origin": "40",
+  "destination": "-1",
   "vehicle_id": 1,
   "target_speed_mps": 10.0,
   "sim_step_size": 0.1,
-  "record_count": 166,
+  "record_count": 144,
   "first_source_tick": 11,
-  "last_source_tick": 176,
-  "output": "/home/siwen/Software/METS-R_docker/METS-R_HPC/V2V-Attack-Dataset/replay_records/intersection_4way/north_to_south.jsonl"
+  "last_source_tick": 154,
+  "output": "/home/siwen/Software/METS-R_docker/METS-R_HPC/V2V-Attack-Dataset/replay_records/intersection_4way/intersection_4way_scenario_01/south_to_west.jsonl"
 }

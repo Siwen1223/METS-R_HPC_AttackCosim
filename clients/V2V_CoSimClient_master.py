@@ -142,6 +142,9 @@ class V2VCoSimClientMaster(CoSimClient):
     def collect_sensor_data(self, output_path=None, tick=None):
         self.sensor_manager.collect_sensor_data(output_path=output_path, tick=tick)
 
+    def get_collision_events(self):
+        return self.sensor_manager.get_collision_events()
+
     def save_sensor_data(self, vid, output_path=None, tick=None):
         self.sensor_manager.save_sensor_data(vid, output_path=output_path, tick=tick)
 

@@ -24,6 +24,8 @@ class DatasetSaver:
         self.meta = dict(meta)
         self.meta.setdefault("run_id", self.run_id)
         self.attack = dict(attack) if attack is not None else {"attack_type": "none"}
+        self.attack.setdefault("impact_level", "low")
+        self.attack.setdefault("impact_evidence", [])
         self._write_json(self.meta_path, self.meta)
         self._write_json(self.attack_path, self.attack)
 
@@ -34,6 +36,7 @@ class DatasetSaver:
         self._trajectory_writers = {}
         self._control_fps = {}
         self._control_writers = {}
+        self._seen_collision_events = 0
 
     def log_event(self, sim_time, message):
         self._events_fp.write(f"[{float(sim_time):.2f}s] {message}\n")
@@ -45,6 +48,7 @@ class DatasetSaver:
         self.record_vehicle_state(tick, sim_time, cosim_client, vehicle_ids)
         self.record_controls(tick, sim_time, step_result.get("controls", {}))
         self.record_bsm_rows(tick, sim_time, (step_result.get("v2x") or {}).get("rows", []))
+        self.record_attack_impact(tick, sim_time, cosim_client, step_result, vehicle_ids)
         self.save_sensors(tick, cosim_client)
 
     def record_vehicle_state(self, tick, sim_time, cosim_client, vehicle_ids):
@@ -115,6 +119,33 @@ class DatasetSaver:
         if isinstance(data_stream, list):
             self.record_bsm_rows(tick, sim_time, data_stream)
 
+    def record_attack_impact(self, tick, sim_time, cosim_client, step_result, vehicle_ids):
+        if self.attack.get("attack_type", "none") == "none":
+            return
+
+        for vid, controller in (step_result.get("controllers") or {}).items():
+            debug_state = controller.get_last_debug_state() if hasattr(controller, "get_last_debug_state") else {}
+            if debug_state.get("attack_influenced_speed"):
+                self._set_impact_level(
+                    "medium",
+                    tick,
+                    sim_time,
+                    f"Vehicle {vid} reduced target speed due to attacked BSM ({debug_state.get('attack_influence_source', '')})",
+                )
+                break
+
+        for collision in self._new_collision_events(cosim_client):
+            if not self._attack_started(sim_time):
+                continue
+            self._set_impact_level(
+                "high",
+                tick,
+                sim_time,
+                "Collision detected by CARLA collision sensor "
+                f"for vehicle {collision.get('vid')} with {collision.get('other_actor_type', '')}",
+            )
+            break
+
     def save_sensors(self, tick, cosim_client=None):
         if cosim_client is None:
             cosim_client = tick
@@ -125,6 +156,7 @@ class DatasetSaver:
         if duration_sec is not None:
             self.meta["duration_sec"] = duration_sec
             self._write_json(self.meta_path, self.meta)
+        self._write_json(self.attack_path, self.attack)
         for fp in (
             [self._events_fp, self._bsm_summary_fp]
             + list(self._bsm_vehicle_fps.values())
@@ -187,6 +219,39 @@ class DatasetSaver:
                 except ValueError:
                     continue
         return f"run_{max(run_numbers, default=0) + 1:06d}"
+
+    def _set_impact_level(self, level, tick, sim_time, reason):
+        current = self.attack.get("impact_level", "low")
+        if self._impact_rank(level) <= self._impact_rank(current):
+            return
+        evidence = {
+            "tick": int(tick),
+            "sim_time": float(sim_time),
+            "level": level,
+            "reason": reason,
+        }
+        self.attack["impact_level"] = level
+        self.attack["impact_evidence"].append(evidence)
+        self.log_event(sim_time, f"attack impact upgraded to {level}: {reason}")
+        self._write_json(self.attack_path, self.attack)
+
+    @staticmethod
+    def _impact_rank(level):
+        return {"low": 0, "medium": 1, "high": 2}.get(level, 0)
+
+    def _new_collision_events(self, cosim_client):
+        if not hasattr(cosim_client, "get_collision_events"):
+            return []
+        events = cosim_client.get_collision_events()
+        new_events = events[self._seen_collision_events:]
+        self._seen_collision_events = len(events)
+        return new_events
+
+    def _attack_started(self, sim_time):
+        start_time = self.attack.get("start_time")
+        if start_time is None:
+            return True
+        return float(sim_time) >= float(start_time)
 
     @staticmethod
     def _write_json(path, data):

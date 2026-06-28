@@ -44,6 +44,7 @@ class SensorManager:
         self.enabled_vids = set()
         self.sensors = {}
         self.queues = {}
+        self.collision_events = []
 
     def enable_vehicle(self, vid, deploy_now=True):
         self.enabled_vids.add(vid)
@@ -109,6 +110,11 @@ class SensorManager:
         self.sensors[vid]["lidar"] = lidar
         self.queues[vid]["lidar"] = lidar_queue
 
+        collision_bp = bp_lib.find("sensor.other.collision")
+        collision = self.world.spawn_actor(collision_bp, carla.Transform(), attach_to=vehicle)
+        collision.listen(lambda event, vehicle_id=vid: self._record_collision(vehicle_id, event))
+        self.sensors[vid]["collision"] = collision
+
     def destroy_vehicle_sensors(self, vid):
         for sensor in self.sensors.get(vid, {}).values():
             try:
@@ -131,6 +137,9 @@ class SensorManager:
     def collect_sensor_data(self, tick=None, output_path=None):
         for vid in list(self.enabled_vids):
             self.save_sensor_data(vid, tick=tick, output_path=output_path)
+
+    def get_collision_events(self):
+        return list(self.collision_events)
 
     def save_sensor_data(self, vid, tick=None, output_path=None):
         if output_path is None and isinstance(tick, (str, Path)):
@@ -177,6 +186,25 @@ class SensorManager:
             return True
         interval = self.lidar_interval_ticks if name == "lidar" else self.camera_interval_ticks
         return interval <= 1 or int(tick) % interval == 0
+
+    def _record_collision(self, vid, event):
+        impulse = getattr(event, "normal_impulse", carla.Vector3D())
+        other_actor = getattr(event, "other_actor", None)
+        self.collision_events.append(
+            {
+                "vid": vid,
+                "frame": getattr(event, "frame", None),
+                "timestamp": getattr(event, "timestamp", None),
+                "other_actor_id": getattr(other_actor, "id", None),
+                "other_actor_type": getattr(other_actor, "type_id", ""),
+                "impulse": {
+                    "x": impulse.x,
+                    "y": impulse.y,
+                    "z": impulse.z,
+                },
+                "impulse_magnitude": float((impulse.x ** 2 + impulse.y ** 2 + impulse.z ** 2) ** 0.5),
+            }
+        )
 
     @staticmethod
     def _latest(queue):
