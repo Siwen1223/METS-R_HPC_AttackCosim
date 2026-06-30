@@ -61,6 +61,7 @@ class CoSimClient(object):
             self.carla_handoff_locs = {}
             self.carla_handoff_yaws = {}
             self.carla_spawn_pending = set()
+            self.handoff_spawn_clearance_m = float(getattr(config, "handoff_spawn_clearance_m", 10.0))
 
             self.displayOnly_vehs = {} # id of agent and vehicle controlled by METSR, only used for display all vehicles
 
@@ -178,6 +179,17 @@ class CoSimClient(object):
                         self.carla_handoff_locs[cosim_id] = self.get_carla_location(veh_info['x'], veh_info['y'])
                         _, handoff_yaw = self.get_carla_rotation(veh_info)
                         self.carla_handoff_yaws[cosim_id] = handoff_yaw
+                        blocking_vid = self._handoff_spawn_blocker(cosim_id, self.carla_handoff_locs[cosim_id])
+                        if blocking_vid is not None:
+                              if cosim_id not in self.carla_spawn_pending:
+                                    handoff_loc = self.carla_handoff_locs[cosim_id]
+                                    print(
+                                          f"Vehicle {cosim_id} handoff delayed because vehicle {blocking_vid} "
+                                          f"is still within {self.handoff_spawn_clearance_m:.1f} m of "
+                                          f"({handoff_loc.x:.2f},{handoff_loc.y:.2f})."
+                                    )
+                              self.carla_spawn_pending.add(cosim_id)
+                              continue
                         spawned_actor = self.spawn_carla_vehicle(cosim_id, private_flag, veh_info, display_only=False)
                         if spawned_actor is None:
                               if cosim_id not in self.carla_spawn_pending:
@@ -223,6 +235,16 @@ class CoSimClient(object):
 
       def get_distance(self, x1, y1, x2, y2):
             return ((x1 - x2) ** 2 + (y1 - y2) ** 2) ** 0.5
+
+      def _handoff_spawn_blocker(self, vid, handoff_loc):
+            if self.handoff_spawn_clearance_m <= 0.0:
+                  return None
+            for other_vid, actor in self.carla_vehs.items():
+                  if other_vid == vid:
+                        continue
+                  if actor.get_location().distance(handoff_loc) < self.handoff_spawn_clearance_m:
+                        return other_vid
+            return None
       
       def spawn_carla_vehicle(self, vid, private_veh, veh_inform, display_only=False):
             tmp_rotation, tmp_yaw = self.get_carla_rotation(veh_inform)

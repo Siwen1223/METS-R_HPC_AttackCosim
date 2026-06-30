@@ -214,6 +214,16 @@ class V2VCoSimClientMaster(CoSimClient):
                         )
                 self.carla_handoff_locs[cosim_id] = handoff_loc
                 self.carla_handoff_yaws[cosim_id] = handoff_yaw
+                blocking_vid = self._handoff_spawn_blocker(cosim_id, handoff_loc)
+                if blocking_vid is not None:
+                    if cosim_id not in self.carla_spawn_pending:
+                        print(
+                            f"Vehicle {cosim_id} handoff delayed because vehicle {blocking_vid} "
+                            f"is still within {self.handoff_spawn_clearance_m:.1f} m of "
+                            f"({handoff_loc.x:.2f},{handoff_loc.y:.2f})."
+                        )
+                    self.carla_spawn_pending.add(cosim_id)
+                    continue
                 spawned_actor = self.spawn_carla_vehicle(cosim_id, private_flag, veh_info, display_only=False)
                 if spawned_actor is None:
                     if cosim_id not in self.carla_spawn_pending:

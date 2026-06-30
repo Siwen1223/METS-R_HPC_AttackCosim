@@ -137,12 +137,15 @@ class DatasetSaver:
         for collision in self._new_collision_events(cosim_client):
             if not self._attack_started(sim_time):
                 continue
+            other_actor_type = collision.get("other_actor_type", "")
+            if not str(other_actor_type).startswith("vehicle."):
+                continue
             self._set_impact_level(
                 "high",
                 tick,
                 sim_time,
-                "Collision detected by CARLA collision sensor "
-                f"for vehicle {collision.get('vid')} with {collision.get('other_actor_type', '')}",
+                "Vehicle-to-vehicle collision detected by CARLA collision sensor "
+                f"for vehicle {collision.get('vid')} with {other_actor_type}",
             )
             break
 

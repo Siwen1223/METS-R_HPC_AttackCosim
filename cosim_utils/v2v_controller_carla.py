@@ -47,8 +47,13 @@ class V2VControllerCarla:
         path_block_static_speed_mps=0.3,
         path_block_stop_buffer=7.0,
         curve_speed_cap_mps=7.5,
+        junction_curve_speed_cap_mps=6.0,
+        sharp_right_curve_speed_cap_mps=5.0,
         curve_lookahead_m=25.0,
         curve_turn_threshold_deg=35.0,
+        local_planner_sampling_radius=1.0,
+        local_planner_base_min_distance=1.5,
+        local_planner_distance_ratio=0.2,
         lane_change_lookahead_s=4.0,
         enable_overtake_lane_change=False,
         enable_debug_draw=False,
@@ -92,8 +97,13 @@ class V2VControllerCarla:
         self.path_block_static_speed_mps = path_block_static_speed_mps
         self.path_block_stop_buffer = path_block_stop_buffer
         self.curve_speed_cap_mps = curve_speed_cap_mps
+        self.junction_curve_speed_cap_mps = junction_curve_speed_cap_mps
+        self.sharp_right_curve_speed_cap_mps = sharp_right_curve_speed_cap_mps
         self.curve_lookahead_m = curve_lookahead_m
         self.curve_turn_threshold_deg = curve_turn_threshold_deg
+        self.local_planner_sampling_radius = local_planner_sampling_radius
+        self.local_planner_base_min_distance = local_planner_base_min_distance
+        self.local_planner_distance_ratio = local_planner_distance_ratio
         self.lane_change_lookahead_s = lane_change_lookahead_s
         self.enable_overtake_lane_change = enable_overtake_lane_change
         self.enable_debug_draw = enable_debug_draw
@@ -110,6 +120,9 @@ class V2VControllerCarla:
         opt_dict = {
             "ignore_traffic_lights": True,
             "ignore_vehicles": True,
+            "sampling_radius": self.local_planner_sampling_radius,
+            "base_min_distance": self.local_planner_base_min_distance,
+            "distance_ratio": self.local_planner_distance_ratio,
         }
         self.agent = BasicAgent(self.vehicle, target_speed=self._to_kmh(target_speed_mps), opt_dict=opt_dict, map_inst=self.map)
         local_planner = self.agent.get_local_planner()
@@ -1058,14 +1071,25 @@ class V2VControllerCarla:
         Inputs: Upcoming CARLA path locations.
         Outputs: Speed cap in m/s, or None when no curve cap is needed.
         """
+        ego_wp = self.map.get_waypoint(
+            self.vehicle.get_location(),
+            project_to_road=True,
+            lane_type=carla.LaneType.Driving,
+        )
+        junction_cap = None
+        if ego_wp is not None and ego_wp.is_junction and self.junction_curve_speed_cap_mps > 0.0:
+            junction_cap = min(self.curve_speed_cap_mps, self.junction_curve_speed_cap_mps)
+
         if len(path_points) < 3 or self.curve_speed_cap_mps <= 0.0:
-            return None
+            return junction_cap
 
         points = [self.vehicle.get_location()] + path_points
         prev_loc = points[0]
         prev_heading = None
         traveled = 0.0
         cumulative_turn = 0.0
+        cumulative_signed_turn = 0.0
+        turn_threshold_rad = math.radians(self.curve_turn_threshold_deg)
 
         for loc in points[1:]:
             segment = prev_loc.distance(loc)
@@ -1074,16 +1098,22 @@ class V2VControllerCarla:
             traveled += segment
             heading = math.atan2(loc.y - prev_loc.y, loc.x - prev_loc.x)
             if prev_heading is not None:
-                delta = abs((heading - prev_heading + math.pi) % (2.0 * math.pi) - math.pi)
-                cumulative_turn += delta
-                if math.degrees(cumulative_turn) >= self.curve_turn_threshold_deg:
+                signed_delta = (heading - prev_heading + math.pi) % (2.0 * math.pi) - math.pi
+                cumulative_signed_turn += signed_delta
+                cumulative_turn += abs(signed_delta)
+                if (
+                    self.sharp_right_curve_speed_cap_mps > 0.0
+                    and cumulative_signed_turn >= turn_threshold_rad
+                ):
+                    return self.sharp_right_curve_speed_cap_mps
+                if cumulative_turn >= turn_threshold_rad:
                     return self.curve_speed_cap_mps
             if traveled >= self.curve_lookahead_m:
                 break
             prev_heading = heading
             prev_loc = loc
 
-        return None
+        return junction_cap
 
     def _route_draw_points(self):
         """
