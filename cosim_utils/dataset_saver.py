@@ -120,7 +120,7 @@ class DatasetSaver:
             self.record_bsm_rows(tick, sim_time, data_stream)
 
     def record_attack_impact(self, tick, sim_time, cosim_client, step_result, vehicle_ids):
-        if self.attack.get("attack_type", "none") == "none":
+        if self.attack.get("attack_type", "none") in {"none", "no_attack"}:
             return
 
         for vid, controller in (step_result.get("controllers") or {}).items():
