@@ -69,10 +69,10 @@ def kafka_bootstrap_servers(config):
 
 
 def docker_compose_command():
-    if shutil.which("docker-compose"):
-        return ["docker-compose"]
     if shutil.which("docker"):
         return ["docker", "compose"]
+    if shutil.which("docker-compose"):
+        return ["docker-compose"]
     raise RuntimeError(
         "Docker Compose was not found. Install Docker Desktop or start Kafka manually on localhost:29092."
     )
@@ -294,6 +294,7 @@ class CarlaSensorPanel:
         self.latest_camera_frame = None
         self.latest_vehicle_camera_frame = None
         self.latest_lidar_frame = None
+        self.overhead_markers = []
 
     def spawn_overhead_camera(
         self,
@@ -428,6 +429,22 @@ class CarlaSensorPanel:
         self.lidar_actor.listen(self._on_lidar)
         return self.lidar_actor
 
+    def detach_vehicle_sensors(self):
+        for actor in (self.vehicle_camera_actor, self.lidar_actor):
+            if actor is not None:
+                try:
+                    self.destroy_actor(actor)
+                except RuntimeError:
+                    pass
+        self.vehicle_camera_actor = None
+        self.vehicle_camera_parent_id = None
+        self.latest_vehicle_camera = None
+        self.lidar_actor = None
+        self.lidar_parent_id = None
+        self.lidar_settings = None
+        self.latest_lidar = None
+        self.target_actor_id = None
+
     def _select_target_actor(self, state, preferred_vehicle_ids=None):
         live_by_vehicle_id = {}
         for store in (getattr(state, "active_vehicles", {}), getattr(state, "display_vehicles", {})):
@@ -444,6 +461,10 @@ class CarlaSensorPanel:
             not preferred_keys or str(self.target_vehicle_id) in preferred_keys
         ):
             target_pair = live_by_vehicle_id.get(str(self.target_vehicle_id))
+
+        if target_pair is None and getattr(self, "strict_target", False) and self.target_vehicle_id is not None:
+            self.target_actor_id = None
+            return None
 
         if target_pair is None:
             for vehicle_id in preferred_keys:
@@ -501,6 +522,10 @@ class CarlaSensorPanel:
     def ensure_sensors(self, state, preferred_vehicle_ids=None):
         self.spawn_overhead_camera()
         target_actor = self._select_target_actor(state, preferred_vehicle_ids=preferred_vehicle_ids)
+        if target_actor is None:
+            if getattr(self, "strict_target", False) and self.target_vehicle_id is not None:
+                self.detach_vehicle_sensors()
+            return
         if target_actor is not None:
             self.track_target_actor(target_actor)
             self.attach_lidar(target_actor)
@@ -510,6 +535,12 @@ class CarlaSensorPanel:
         if self.latest_camera is None:
             return blank_png("Waiting for CARLA bird-eye camera")
         return image_array_to_png(self.latest_camera)
+
+    def set_overhead_markers(self, markers):
+        self.overhead_markers = list(markers or [])
+
+    def clear_overhead_markers(self):
+        self.overhead_markers = []
 
     def vehicle_camera_png(self):
         if self.latest_vehicle_camera is None:
@@ -539,8 +570,55 @@ class CarlaSensorPanel:
         array = np.frombuffer(image.raw_data, dtype=np.uint8)
         array = array.reshape((image.height, image.width, 4))
         rgb = array[:, :, :3][:, :, ::-1]
+        rgb = self._overlay_overhead_markers(rgb.copy(), image.width, image.height)
         self.latest_camera = rgb.copy()
         self.latest_camera_frame = image.frame
+
+    def _overlay_overhead_markers(self, rgb, width, height):
+        if self.camera_actor is None or not self.overhead_markers:
+            return rgb
+        try:
+            transform = self.camera_actor.get_transform()
+            world_to_camera = np.asarray(transform.get_inverse_matrix(), dtype=float)
+            fov = float(self.camera_actor.attributes.get("fov", 80.0))
+        except Exception:
+            return rgb
+
+        focal = float(width) / (2.0 * math.tan(math.radians(fov) / 2.0))
+        cx = float(width) / 2.0
+        cy = float(height) / 2.0
+
+        for marker in self.overhead_markers:
+            location = marker.get("location") if isinstance(marker, dict) else marker
+            if location is None:
+                continue
+            try:
+                point = np.array([float(location.x), float(location.y), float(location.z), 1.0])
+                camera_point = world_to_camera.dot(point)
+                depth = float(camera_point[0])
+                if depth <= 0.01:
+                    continue
+                u = int(cx + focal * float(camera_point[1]) / depth)
+                v = int(cy - focal * float(camera_point[2]) / depth)
+            except Exception:
+                continue
+            if u < 0 or v < 0 or u >= int(width) or v >= int(height):
+                continue
+
+            size_px = int(marker.get("size_px", 12) if isinstance(marker, dict) else 12)
+            size_px = max(4, min(36, size_px))
+            half = size_px // 2
+            x0 = max(0, u - half)
+            x1 = min(int(width), u + half + 1)
+            y0 = max(0, v - half)
+            y1 = min(int(height), v + half + 1)
+            rgb[y0:y1, x0:x1, :] = np.array([255, 69, 0], dtype=np.uint8)
+            border = max(1, size_px // 6)
+            rgb[y0:min(y1, y0 + border), x0:x1, :] = np.array([255, 220, 160], dtype=np.uint8)
+            rgb[max(y0, y1 - border):y1, x0:x1, :] = np.array([255, 220, 160], dtype=np.uint8)
+            rgb[y0:y1, x0:min(x1, x0 + border), :] = np.array([255, 220, 160], dtype=np.uint8)
+            rgb[y0:y1, max(x0, x1 - border):x1, :] = np.array([255, 220, 160], dtype=np.uint8)
+        return rgb
 
     def _on_vehicle_camera(self, image):
         array = np.frombuffer(image.raw_data, dtype=np.uint8)
@@ -1547,22 +1625,30 @@ def _draw_tracr_obstacle_ghost_marker(runtime, ghost_record):
             world,
             ghost_record["x"],
             ghost_record["y"],
-            z_offset=1.4,
+            z_offset=1.0,
         )
         color = carla_module.Color(255, 69, 0)
-        world.debug.draw_point(location, size=0.45, color=color, life_time=0.35)
-        world.debug.draw_string(
-            location + carla_module.Location(z=1.1),
-            "OBSTACLE GHOST BSM",
-            draw_shadow=False,
-            color=color,
-            life_time=0.35,
+        yaw = deps["metsr_bearing_to_carla_yaw"](ghost_record.get("bearing", 0.0))
+        box = carla_module.BoundingBox(
+            location,
+            carla_module.Vector3D(x=1.0, y=1.0, z=1.0),
         )
+        rotation = carla_module.Rotation(pitch=0.0, yaw=float(yaw), roll=0.0)
+        world.debug.draw_box(box, rotation, thickness=0.08, color=color, life_time=0.35)
     except Exception:
         return None
 
 class TRACRDashboard:
-    def __init__(self, viz_url="https://engineering.purdue.edu/HSEES/METSRVis/", stream_url=None, fullscreen=False, local_viz_patch=False, bsm_stream_label="Kafka", bsm_ego_only=True):
+    def __init__(
+        self,
+        viz_url="https://engineering.purdue.edu/HSEES/METSRVis/",
+        stream_url=None,
+        fullscreen=False,
+        local_viz_patch=False,
+        bsm_stream_label="Kafka",
+        bsm_ego_only=True,
+        title="TRACR Data Collection Demo",
+    ):
         try:
             import ipywidgets as widgets
         except ImportError:
@@ -1576,6 +1662,7 @@ class TRACRDashboard:
         self.local_viz_patch = bool(local_viz_patch)
         self.bsm_stream_label = str(bsm_stream_label or "BSM")
         self.bsm_ego_only = bool(bsm_ego_only)
+        self.title = str(title or "TRACR Data Collection Demo")
         self.fullscreen = bool(fullscreen)
         self._display_handle = None
         self._status_text = "Ready"
@@ -1837,7 +1924,7 @@ class TRACRDashboard:
             ),
         )
         container = widgets.VBox(
-            [style, widgets.HTML("<h2>TRACR Purdue Data Collection Demo</h2>"), self.status, grid],
+            [style, widgets.HTML(f"<h2>{escape(self.title)}</h2>"), self.status, grid],
             layout=widgets.Layout(width="100%"),
         )
         try:
@@ -1855,7 +1942,7 @@ class TRACRDashboard:
         return f"""
         {self._styles()}
         <div class="{self._shell_class()}">
-          <h2>TRACR Purdue Data Collection Demo</h2>
+          <h2>{escape(self.title)}</h2>
           <div class="tracr-note">{escape(str(self._status_text))}</div>
           <div class="tracr-grid">
             <div class="tracr-panel tracr-panel--major"><h3>METS-R Viz live stream</h3>{self._viz_html(self.viz_url, self.stream_url)}</div>
@@ -2048,12 +2135,12 @@ class TRACRDashboard:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>TRACR Purdue Dashboard</title>
+  <title>{escape(self.title)}</title>
   <style>{self._external_css()}</style>
 </head>
 <body>
   <div class="tracr-wrap">
-    <h2>TRACR Purdue Data Collection Demo</h2>
+    <h2>{escape(self.title)}</h2>
     <div id="status" class="tracr-note">Ready</div>
     <div class="tracr-grid">
       <div class="tracr-panel tracr-panel--major"><h3>METS-R Viz live stream</h3><div class="tracr-frame"><iframe src="{frame_url}" allow="local-network-access; clipboard-read; clipboard-write" referrerpolicy="no-referrer-when-downgrade"></iframe><div class="tracr-note">Use exact stream URL in METS-R Vis: <code id="stream-url">{stream}</code> | <a id="viz-popout" href="{frame_url}" target="_blank" rel="noopener">open top-level</a></div><div class="tracr-note">{frame_status}</div><div id="stream-probe" class="tracr-note"></div></div></div>
@@ -2410,6 +2497,10 @@ def launch_tracr_demo(
     private_vehicle_count=60,
     v2x_vehicle_count=20,
     private_vehicle_start_id=1000,
+    trip_specs=None,
+    cosim_roads=None,
+    trip_departure_gap_ticks=0,
+    release_ready_queue=False,
     start_kafka=None,
     start_metsr=True,
     start_carla=True,
@@ -2460,6 +2551,8 @@ def launch_tracr_demo(
         port=port,
         timeout=600,
     )
+    for road_id in cosim_roads or []:
+        metsr.set_cosim_road(str(road_id))
 
     carla_client = carla_tm = world = None
     if start_carla:
@@ -2501,9 +2594,24 @@ def launch_tracr_demo(
             require_backend="simu5g_cellular_uu" if require_simu5g_backend else None,
         )
 
-    vehicle_ids = list(range(private_vehicle_start_id, private_vehicle_start_id + private_vehicle_count))
-    if vehicle_ids:
-        metsr.generate_trip(vehicle_ids, -1, -1)
+    if trip_specs is None:
+        vehicle_ids = list(range(private_vehicle_start_id, private_vehicle_start_id + private_vehicle_count))
+        if vehicle_ids:
+            metsr.generate_trip(vehicle_ids, -1, -1)
+    else:
+        vehicle_ids = []
+        gap_ticks = max(0, int(trip_departure_gap_ticks or 0))
+        for index, spec in enumerate(trip_specs):
+            if isinstance(spec, Mapping):
+                vehicle_id = spec["vehicle_id"]
+                origin = spec["origin"]
+                destination = spec["destination"]
+            else:
+                vehicle_id, origin, destination = spec[:3]
+            vehicle_ids.append(vehicle_id)
+            if index > 0 and gap_ticks > 0:
+                metsr.tick(gap_ticks)
+            metsr.generate_trip_between_roads([vehicle_id], str(origin), str(destination))
     v2x_ids = vehicle_ids[: max(0, min(v2x_vehicle_count, len(vehicle_ids)))]
     if v2x_ids:
         metsr.update_vehicle_sensor_type(v2x_ids, "cv2x", True)
@@ -2521,7 +2629,7 @@ def launch_tracr_demo(
         sensor_panel = CarlaSensorPanel(world, deps["carla"], deps["destroy_carla_actor"])
         sensor_panel.spawn_overhead_camera(z=carla_camera_z)
 
-    return TRACRDemoRuntime(
+    runtime = TRACRDemoRuntime(
         config=config,
         sim_dirs=sim_dirs,
         metsr=metsr,
@@ -2544,6 +2652,8 @@ def launch_tracr_demo(
         projection_heading_smoothing=float(projection_heading_smoothing),
         projection_z_offset=float(projection_z_offset),
     )
+    runtime.release_ready_queue = bool(release_ready_queue)
+    return runtime
 
 
 def _unique_ordered(values):
@@ -2683,6 +2793,19 @@ def _query_tracr_focus_vehicle(runtime):
     focus_vehicle_id = getattr(runtime, "focus_vehicle_id", None)
     if focus_vehicle_id is not None:
         candidates.append(focus_vehicle_id)
+        if getattr(runtime, "lock_focus_vehicle", False):
+            try:
+                response = runtime.metsr.query_vehicle(
+                    id=[focus_vehicle_id],
+                    private_veh=[True],
+                    transform_coords=True,
+                )
+            except Exception as exc:
+                return None, None, str(exc).splitlines()[0]
+            records = response.get("DATA", []) or []
+            if records and _vehicle_is_live(records[0]):
+                return focus_vehicle_id, records[0], ""
+            return None, None, ""
     sensor_panel = getattr(runtime, "sensor_panel", None)
     sensor_target = getattr(sensor_panel, "target_vehicle_id", None) if sensor_panel is not None else None
     if sensor_target is not None:
@@ -2918,6 +3041,9 @@ def _sync_tracr_road_context_vehicles(runtime, deps):
             continue
         desired_ids.add(veh_id)
         info["live"] += 1
+        if veh_id in state.active_vehicles:
+            info["updated"] += 1
+            continue
         actor = state.active_vehicles.get(veh_id) or state.display_vehicles.get(veh_id)
         actor_alive = False
         if actor is not None:
@@ -3022,7 +3148,7 @@ def step_tracr_demo(
         metsr_roads=[],
         display_all=False,
         transform_coords=True,
-        release_ready_queue=False,
+        release_ready_queue=bool(getattr(runtime, "release_ready_queue", False)),
         metsr_wait_forever=True,
         verbose=False,
     )
@@ -3041,6 +3167,8 @@ def step_tracr_demo(
     if update_sensors and runtime.sensor_panel is not None:
         start = time.perf_counter()
         preferred_vehicle_ids = []
+        if getattr(runtime, "focus_vehicle_id", None) is not None:
+            preferred_vehicle_ids.append(getattr(runtime, "focus_vehicle_id"))
         if projection_info.get("focus_vehicle") is not None:
             preferred_vehicle_ids.append(projection_info.get("focus_vehicle"))
         preferred_vehicle_ids.extend(getattr(runtime, "v2x_vehicle_ids", None) or [])
@@ -3147,7 +3275,6 @@ def benchmark_tracr_demo(runtime, dashboard=None, ticks=60, **kwargs):
 def _keep_carla_projection_passive(state, carla_module=None):
     if state is None:
         return
-    for store in (getattr(state, "active_vehicles", {}), getattr(state, "display_vehicles", {})):
-        for actor in list(store.values()):
-            _zero_projection_actor_motion(actor, carla_module)
+    for actor in list(getattr(state, "display_vehicles", {}).values()):
+        _zero_projection_actor_motion(actor, carla_module)
 
