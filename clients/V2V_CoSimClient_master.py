@@ -203,7 +203,7 @@ class V2VCoSimClientMaster(CoSimClient):
                 self.carla_destRoad[cosim_id] = route[-1] if route else None
                 handoff_loc = self.get_carla_location(veh_info["x"], veh_info["y"])
                 _, handoff_yaw = self.get_carla_rotation(veh_info)
-                route_handoff = self._route_handoff_pose(route, handoff_loc)
+                route_handoff = self._route_handoff_pose(route, handoff_loc, cosim_id)
                 if route_handoff is not None:
                     handoff_loc, handoff_yaw, lane_path = route_handoff
                     if getattr(self.config, "verbose", False):
@@ -246,7 +246,7 @@ class V2VCoSimClientMaster(CoSimClient):
         if self.display_all:
             self.sync_display_only_vehicles(current_cosim_ids)
 
-    def _route_handoff_pose(self, route_ids, reference_loc):
+    def _route_handoff_pose(self, route_ids, reference_loc, vid=None):
         if not route_ids:
             return None
         net_path = getattr(self.config, "network_file", None)
@@ -257,7 +257,16 @@ class V2VCoSimClientMaster(CoSimClient):
         return self.handoff_path_planner.route_handoff_pose(
             route_ids,
             reference_carla_location=reference_loc,
+            preferred_lane_ids=self._preferred_lane_ids(vid),
         )
+
+    def _preferred_lane_ids(self, vid):
+        lane_paths = getattr(self.config, "controller_lane_paths", {}) or {}
+        if vid in lane_paths:
+            return list(lane_paths[vid])
+        if str(vid) in lane_paths:
+            return list(lane_paths[str(vid)])
+        return []
 
     def _vehicle_for_sensor(self, vid):
         return self.carla_vehs.get(vid) or self.displayOnly_vehs.get(vid)
@@ -286,6 +295,7 @@ class V2VCoSimClientMaster(CoSimClient):
             "target_speed_mps": float(getattr(self.config, "v2v_target_speed_mps", 10.0)),
             "enable_debug_draw": bool(getattr(self.config, "enable_debug_draw", False)),
             "v2v_position_mode": getattr(self.config, "v2v_position_mode", "local"),
+            "preferred_lane_ids": self._preferred_lane_ids(vid),
         }
         kwargs.update(self.controller_kwargs)
         kwargs.update(getattr(self.config, "controller_kwargs", {}) or {})
@@ -313,6 +323,17 @@ class V2VCoSimClientMaster(CoSimClient):
                 self.route_synced[vid] = True
                 if getattr(self.config, "enable_debug_draw", False) and controller.path_planner is not None:
                     controller.path_planner.draw_lane_points()
+                if getattr(self.config, "verbose", False):
+                    points = list(getattr(controller, "_route_points", []) or [])
+                    if points:
+                        xs = [point.x for point in points]
+                        ys = [point.y for point in points]
+                        print(
+                            f"[route-plan] veh={vid} points={len(points)} "
+                            f"first=({points[0].x:.2f},{points[0].y:.2f},{points[0].z:.2f}) "
+                            f"last=({points[-1].x:.2f},{points[-1].y:.2f},{points[-1].z:.2f}) "
+                            f"bbox=({min(xs):.2f},{min(ys):.2f})-({max(xs):.2f},{max(ys):.2f})"
+                        )
             elif route_ids and getattr(self.config, "verbose", False):
                 print(
                     f"WARNING: failed to sync CARLA route for veh={vid}; "

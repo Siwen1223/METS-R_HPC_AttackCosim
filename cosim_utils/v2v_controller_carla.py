@@ -1,4 +1,5 @@
 import math
+from types import SimpleNamespace
 
 import carla
 from cosim_utils.agents.navigation.basic_agent import BasicAgent
@@ -24,7 +25,7 @@ class V2VControllerCarla:
         path_planner=None,
         target_speed_mps=10.0,
         time_headway=1.2,
-        min_gap=5.5,
+        min_gap=1.5,
         lead_vehicle_length=4.8,
         idm_max_accel=2.0,
         idm_comfort_decel=3.0,
@@ -57,6 +58,8 @@ class V2VControllerCarla:
         lane_change_lookahead_s=4.0,
         enable_overtake_lane_change=False,
         enable_debug_draw=False,
+        route_project_to_carla_map=True,
+        preferred_lane_ids=None,
         v2v_position_mode="geodetic",
         v2v_lat_key="true_x", #"latitude", latitude and longitude are noisy data.
         v2v_lon_key="true_y", #"longitude",
@@ -107,6 +110,8 @@ class V2VControllerCarla:
         self.lane_change_lookahead_s = lane_change_lookahead_s
         self.enable_overtake_lane_change = enable_overtake_lane_change
         self.enable_debug_draw = enable_debug_draw
+        self.route_project_to_carla_map = bool(route_project_to_carla_map)
+        self.preferred_lane_ids = list(preferred_lane_ids or [])
         self.v2v_position_mode = v2v_position_mode
         self.v2v_lat_key = v2v_lat_key
         self.v2v_lon_key = v2v_lon_key
@@ -116,6 +121,8 @@ class V2VControllerCarla:
         self.path_planner = path_planner
         if self.path_planner is None and net_path is not None:
             self.path_planner = CosimPathPlanner(self.world, net_path)
+        if self.path_planner is not None:
+            self.path_planner.project_to_carla_map = self.route_project_to_carla_map
 
         opt_dict = {
             "ignore_traffic_lights": True,
@@ -130,6 +137,7 @@ class V2VControllerCarla:
         if vehicle_controller is not None:
             vehicle_controller.past_steering = 0.0
         self._route_points = []
+        self._route_debug_drawn = False
         self._last_debug_state = {}
 
     # Route setup API.
@@ -161,6 +169,7 @@ class V2VControllerCarla:
         """
         if not coord_map:
             return
+        original_point_count = len(coord_map)
         coord_map = self._path_trim_to_nearest_ahead(
             coord_map,
             start_point_carla=start_point_carla,
@@ -198,6 +207,7 @@ class V2VControllerCarla:
 
             print(
                 f"[route-trim] veh={self.ego_vid} "
+                f"points={original_point_count}->{len(coord_map)} "
                 f"start=({start_point_carla.x:.2f},{start_point_carla.y:.2f}) "
                 f"first=({first_loc.x:.2f},{first_loc.y:.2f}) "
                 f"first_long={first_long:.2f} first_lat={first_lat:.2f} "
@@ -214,16 +224,23 @@ class V2VControllerCarla:
         for loc in coord_map:
             if not isinstance(loc, carla.Location):
                 loc = carla.Location(x=loc[0], y=loc[1], z=loc[2] if len(loc) > 2 else 0.0)
-            wp = self.map.get_waypoint(loc, project_to_road=True, lane_type=carla.LaneType.Driving)
-            if wp is not None:
-                plan.append((wp, RoadOption.LANEFOLLOW))
-                self._route_points.append(wp.transform.location)
+            if self.route_project_to_carla_map:
+                wp = self.map.get_waypoint(loc, project_to_road=True, lane_type=carla.LaneType.Driving)
+                if wp is None:
+                    continue
+                route_loc = wp.transform.location
+            else:
+                wp = SimpleNamespace(transform=carla.Transform(loc, carla.Rotation()))
+                route_loc = loc
+            plan.append((wp, RoadOption.LANEFOLLOW))
+            self._route_points.append(route_loc)
         if plan:
             self.agent.set_global_plan(
                 plan,
                 stop_waypoint_creation=stop_waypoint_creation,
                 clean_queue=clean_queue,
             )
+            self._route_debug_drawn = False
 
     def set_route_from_metsr_route(
         self,
@@ -245,6 +262,7 @@ class V2VControllerCarla:
             route_ids,
             start_point_carla=start_point_carla,
             start_yaw_carla=start_yaw_carla,
+            preferred_lane_ids=self.preferred_lane_ids,
         )
         if draw_plan:
             self.path_planner.draw_coarse_points()
@@ -1123,15 +1141,32 @@ class V2VControllerCarla:
         """
         if not self._route_points:
             return
+        if self._route_debug_drawn:
+            return
         color = carla.Color(255, 220, 0)
-        for loc in self._route_points:
+        draw_points = [
+            carla.Location(x=loc.x, y=loc.y, z=loc.z + 1.0)
+            for loc in self._route_points
+        ]
+        for draw_loc in draw_points:
             self.world.debug.draw_point(
-                loc,
-                size=0.12,
+                draw_loc,
+                size=0.22,
                 color=color,
                 life_time=0.0,
                 persistent_lines=True,
             )
+        for start, end in zip(draw_points[:-1], draw_points[1:]):
+            if start.distance(end) <= 8.0:
+                self.world.debug.draw_line(
+                    start,
+                    end,
+                    thickness=0.08,
+                    color=color,
+                    life_time=0.0,
+                    persistent_lines=True,
+                )
+        self._route_debug_drawn = True
 
     # Conflict geometry helpers.
 

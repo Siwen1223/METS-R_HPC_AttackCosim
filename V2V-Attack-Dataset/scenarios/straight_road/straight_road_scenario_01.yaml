@@ -1,0 +1,47 @@
+scenario_id: "straight_road_scenario_01"
+name: "Town05 road -38/-12/-34 straight-road segment"
+scenario_type: "straight_road"
+
+town: "Town05"
+network_file: "data/CARLA/Town05/facility/road/Town05.net.xml"
+config_file: "configs/run_cosim_CARLAT5.json"
+
+road_center_xy_carla: [201.99, -11.17]
+
+roads:
+  negative_direction:
+    incoming: ["-38"]
+    middle: ["-12"]
+    outgoing: ["-34"]
+  positive_direction:
+    incoming: ["34"]
+    middle: ["12"]
+    outgoing: ["38"]
+
+lanes:
+  "-38": ["-38_3", "-38_4", "-38_5"]
+  "-12": ["-12_3", "-12_4", "-12_5"]
+  "-34": ["-34_3", "-34_4", "-34_5"]
+  "34": ["34_2", "34_3", "34_4"]
+  "12": ["12_2", "12_3", "12_4"]
+  "38": ["38_2", "38_3", "38_4"]
+
+movements:
+  negative: {origin: "-38", destination: "-34", maneuver: straight}
+  positive: {origin: "34", destination: "38", maneuver: straight}
+
+cosim_roads:
+  - "-38"
+  - "-12"
+  - "-34"
+  - "38"
+  - "12"
+  - "34"
+
+traffic_lights:
+  enabled: false
+
+right_of_way:
+  type: single_road
+
+notes: "Straight-road scenario with one bidirectional Town05 road segment and no intersection/merge interaction."

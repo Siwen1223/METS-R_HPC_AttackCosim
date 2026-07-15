@@ -1,0 +1,41 @@
+scenario_id: "straight_road_scenario_02"
+name: "Town07 road -20/-21 straight-road segment"
+scenario_type: "straight_road"
+
+town: "Town07"
+network_file: "data/CARLA/Town07/facility/road/Town07.net.xml"
+config_file: "configs/run_cosim_CARLAT7.json"
+
+road_center_xy_carla: [-58, -118]
+
+roads:
+  negative_direction:
+    incoming: ["-20"]
+    outgoing: ["-21"]
+  positive_direction:
+    incoming: ["21"]
+    outgoing: ["20"]
+
+lanes:
+  "-20": ["-20_1"]
+  "-21": ["-21_1"]
+  "21": ["21_1"]
+  "20": ["20_1"]
+
+movements:
+  negative: {origin: "-20", destination: "-21", maneuver: straight}
+  positive: {origin: "21", destination: "20", maneuver: straight}
+
+cosim_roads:
+  - "-20"
+  - "-21"
+  - "21"
+  - "20"
+
+traffic_lights:
+  enabled: false
+
+right_of_way:
+  type: single_road
+
+notes: "Straight-road scenario with one bidirectional Town07 road segment and no intersection/merge interaction. Lanes are restricted to one configured lane per road for scenario generation."

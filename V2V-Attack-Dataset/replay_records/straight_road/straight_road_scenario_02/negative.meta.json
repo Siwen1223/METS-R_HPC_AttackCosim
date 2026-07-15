@@ -1,0 +1,16 @@
+{
+  "record_type": "straight_road_replay_bsm_trajectory",
+  "scenario_id": "straight_road_scenario_02",
+  "scenario_path": "/home/siwen/Software/METS-R_docker/METS-R_HPC/V2V-Attack-Dataset/scenarios/straight_road/straight_road_scenario_02.yaml",
+  "movement": "negative",
+  "maneuver": "straight",
+  "origin": "-20",
+  "destination": "-21",
+  "vehicle_id": 1,
+  "target_speed_mps": 5.0,
+  "sim_step_size": 0.1,
+  "record_count": 600,
+  "first_source_tick": 1,
+  "last_source_tick": 600,
+  "output": "/home/siwen/Software/METS-R_docker/METS-R_HPC/V2V-Attack-Dataset/replay_records/straight_road/straight_road_scenario_02/negative.jsonl"
+}

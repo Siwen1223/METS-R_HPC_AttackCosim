@@ -41,6 +41,7 @@ class CosimPathPlanner:
         self.lane_waypoints = []
         self.missing_edges = []
         self.selected_lane_path = []
+        self.project_to_carla_map = True
 
     def build_coarse_points(self, route_ids):
         """
@@ -62,7 +63,7 @@ class CosimPathPlanner:
         self.coarse_points_carla = [self._metsr_to_carla(point) for point in self.coarse_points_metsr]
         return list(self.coarse_points_metsr)
 
-    def build_lane_points(self, route_ids, start_point_carla=None, start_yaw_carla=None):
+    def build_lane_points(self, route_ids, start_point_carla=None, start_yaw_carla=None, preferred_lane_ids=None):
         """
         Generate a lane-level route by searching the lane graph instead of offsetting edge shapes.
         """
@@ -76,7 +77,9 @@ class CosimPathPlanner:
         if not route_ids or start_point_carla is None:
             return []
 
-        start_lane_id = self._select_start_lane(start_point_carla, start_yaw_carla, route_ids)
+        start_lane_id = self._preferred_start_lane(preferred_lane_ids, route_ids)
+        if start_lane_id is None:
+            start_lane_id = self._select_start_lane(start_point_carla, start_yaw_carla, route_ids)
         if start_lane_id is None:
             return []
 
@@ -98,16 +101,17 @@ class CosimPathPlanner:
         self.lane_waypoints = []
         route_points = []
         for loc in lane_points_carla:
-            if self.map is not None:
+            if self.map is not None and self.project_to_carla_map:
                 wp = self.map.get_waypoint(loc, project_to_road=True, lane_type=carla.LaneType.Driving)
                 if wp is not None:
                     route_points.append(wp.transform.location)
                     self.lane_waypoints.append((wp, None))
                     continue
+            self.lane_waypoints.append((loc, None))
             route_points.append(loc)
         return self._dedupe_locations(route_points)
 
-    def route_handoff_pose(self, route_ids, reference_carla_location=None):
+    def route_handoff_pose(self, route_ids, reference_carla_location=None, preferred_lane_ids=None):
         """
         Choose a route-compatible starting lane and project the handoff pose onto that lane.
         Inputs: METS-R edge route and optional current CARLA handoff location.
@@ -117,7 +121,11 @@ class CosimPathPlanner:
         if not route_ids:
             return None
         reference_metsr = self._carla_to_metsr(reference_carla_location) if reference_carla_location is not None else None
-        lane_path = self._select_route_lane_path(route_ids, reference_metsr=reference_metsr)
+        start_lane_id = self._preferred_start_lane(preferred_lane_ids, route_ids)
+        if start_lane_id is not None:
+            lane_path = self._build_lane_path(start_lane_id, route_ids)
+        else:
+            lane_path = self._select_route_lane_path(route_ids, reference_metsr=reference_metsr)
         if not lane_path:
             return None
 
@@ -133,6 +141,19 @@ class CosimPathPlanner:
             seg_t = 0.0
         yaw = self._segment_yaw_carla(shape, seg_idx, seg_t)
         return self._metsr_to_carla(point_metsr), yaw, lane_path
+
+    def _preferred_start_lane(self, preferred_lane_ids, route_ids):
+        if not preferred_lane_ids:
+            return None
+        route_set = set(str(route_id) for route_id in route_ids)
+        for lane_id in preferred_lane_ids:
+            lane_id = str(lane_id)
+            lane = self.lanes.get(lane_id)
+            if lane is None or not lane["is_driving"]:
+                continue
+            if lane["edge_id"] in route_set:
+                return lane_id
+        return None
 
     def build_carla_routepoints_from_metsr(self, route_ids, centerline_response, sampling_locs=(0.2, 0.5, 0.8)):
         """
@@ -185,13 +206,14 @@ class CosimPathPlanner:
                 persistent_lines=True,
             )
 
-    def draw_lane_points(self, color=None, size=0.12, life_time=0.0):
+    def draw_lane_points(self, color=None, size=0.22, life_time=0.0):
         if self.world is None:
             return
         if color is None:
             color = carla.Color(255, 255, 0)
         for wp, _ in self.lane_waypoints:
             loc = wp.transform.location if hasattr(wp, "transform") else wp
+            loc = carla.Location(x=loc.x, y=loc.y, z=loc.z + 1.0)
             self.world.debug.draw_point(
                 loc,
                 size=size,
@@ -526,7 +548,10 @@ class CosimPathPlanner:
             parts = pair.split(",")
             if len(parts) < 2:
                 continue
-            points.append((float(parts[0]), float(parts[1])))
+            if len(parts) >= 3:
+                points.append((float(parts[0]), float(parts[1]), float(parts[2])))
+            else:
+                points.append((float(parts[0]), float(parts[1])))
         return points
 
     def _point_at_fraction(self, points, fraction):
@@ -545,6 +570,9 @@ class CosimPathPlanner:
                 t = (target - walked) / length if length > 0.0 else 0.0
                 px = a[0] + (b[0] - a[0]) * t
                 py = a[1] + (b[1] - a[1]) * t
+                if len(a) >= 3 and len(b) >= 3:
+                    pz = a[2] + (b[2] - a[2]) * t
+                    return (px, py, pz), b
                 return (px, py), b
             walked += length
         return points[-2], points[-1]
@@ -575,21 +603,34 @@ class CosimPathPlanner:
     def _resample_polyline(self, polyline, step=2.0):
         if len(polyline) < 2:
             return polyline
+
+        cumulative = [0.0]
+        for current, nxt in zip(polyline[:-1], polyline[1:]):
+            cumulative.append(cumulative[-1] + self._distance_2d(current, nxt))
+        total = cumulative[-1]
+        if total <= 0.0:
+            return [polyline[0]]
+
         result = [polyline[0]]
-        carry = 0.0
-        current = polyline[0]
-        for nxt in polyline[1:]:
-            segment_len = self._distance_2d(current, nxt)
-            if segment_len == 0.0:
-                current = nxt
-                continue
-            direction = ((nxt[0] - current[0]) / segment_len, (nxt[1] - current[1]) / segment_len)
-            walked = carry
-            while walked + step <= segment_len:
-                walked += step
-                result.append((current[0] + direction[0] * walked, current[1] + direction[1] * walked))
-            carry = segment_len - walked
-            current = nxt
+        target = float(step)
+        segment_idx = 0
+        while target < total:
+            while segment_idx < len(cumulative) - 2 and cumulative[segment_idx + 1] < target:
+                segment_idx += 1
+            start = polyline[segment_idx]
+            end = polyline[segment_idx + 1]
+            seg_start = cumulative[segment_idx]
+            seg_len = cumulative[segment_idx + 1] - seg_start
+            t = 0.0 if seg_len <= 0.0 else (target - seg_start) / seg_len
+            x = start[0] + (end[0] - start[0]) * t
+            y = start[1] + (end[1] - start[1]) * t
+            if len(start) >= 3 and len(end) >= 3:
+                z = start[2] + (end[2] - start[2]) * t
+                result.append((x, y, z))
+            else:
+                result.append((x, y))
+            target += float(step)
+
         if not self._points_close(result[-1], polyline[-1]):
             result.append(polyline[-1])
         deduped = [result[0]]
@@ -644,9 +685,9 @@ class CosimPathPlanner:
         return math.sqrt(dx * dx + dy * dy)
 
     def _project_point_to_segment(self, point, a, b):
-        ax, ay = a
-        bx, by = b
-        px, py = point
+        ax, ay = a[0], a[1]
+        bx, by = b[0], b[1]
+        px, py = point[0], point[1]
         abx = bx - ax
         aby = by - ay
         denom = abx * abx + aby * aby
@@ -654,7 +695,11 @@ class CosimPathPlanner:
             return a, 0.0
         t = ((px - ax) * abx + (py - ay) * aby) / denom
         t = max(0.0, min(1.0, t))
-        return (ax + abx * t, ay + aby * t), t
+        x = ax + abx * t
+        y = ay + aby * t
+        if len(a) >= 3 and len(b) >= 3:
+            return (x, y, a[2] + (b[2] - a[2]) * t), t
+        return (x, y), t
 
     def _points_close(self, a, b, eps=0.05):
         return self._distance_2d(a, b) <= eps
@@ -665,10 +710,13 @@ class CosimPathPlanner:
     def _sumo_to_metsr(self, point, net_offset=None):
         if net_offset is None:
             net_offset = self.net_offset
+        if len(point) >= 3:
+            return point[0] - net_offset[0], point[1] - net_offset[1], point[2]
         return point[0] - net_offset[0], point[1] - net_offset[1]
 
     def _metsr_to_carla(self, point):
-        return carla.Location(x=point[0], y=-point[1], z=0.5)
+        z = point[2] + 0.5 if len(point) >= 3 else 0.5
+        return carla.Location(x=point[0], y=-point[1], z=z)
 
     def _carla_to_metsr(self, location):
         return (location.x, -location.y)

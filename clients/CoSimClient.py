@@ -99,6 +99,14 @@ class CoSimClient(object):
             transform.rotation.roll = roll
             spectator.set_transform(transform)
 
+      def set_follow_vehicle_overhead_camera(self, vid, height=120, yaw=-90, pitch=-90, roll=0):
+            vehicle = self.carla_vehs.get(vid) or self.displayOnly_vehs.get(vid)
+            if vehicle is None:
+                  return False
+            loc = vehicle.get_location()
+            self.set_custom_camera(loc.x, loc.y, loc.z + height, yaw=yaw, pitch=pitch, roll=roll)
+            return True
+
       def set_unsignalized_intersection_lights(self, state=None, freeze=True):
             if state is None:
                   state = carla.TrafficLightState.Yellow
@@ -242,9 +250,24 @@ class CoSimClient(object):
             for other_vid, actor in self.carla_vehs.items():
                   if other_vid == vid:
                         continue
+                  if self._handoff_uses_different_lane_path(vid, other_vid):
+                        continue
                   if actor.get_location().distance(handoff_loc) < self.handoff_spawn_clearance_m:
                         return other_vid
             return None
+
+      def _handoff_uses_different_lane_path(self, vid, other_vid):
+            lane_path = self._configured_lane_path(vid)
+            other_lane_path = self._configured_lane_path(other_vid)
+            return bool(lane_path and other_lane_path and lane_path != other_lane_path)
+
+      def _configured_lane_path(self, vid):
+            lane_paths = getattr(self.config, "controller_lane_paths", {}) or {}
+            if vid in lane_paths:
+                  return tuple(lane_paths[vid])
+            if str(vid) in lane_paths:
+                  return tuple(lane_paths[str(vid)])
+            return tuple()
       
       def spawn_carla_vehicle(self, vid, private_veh, veh_inform, display_only=False):
             tmp_rotation, tmp_yaw = self.get_carla_rotation(veh_inform)

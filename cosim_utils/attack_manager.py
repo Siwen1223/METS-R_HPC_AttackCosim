@@ -223,6 +223,7 @@ class StaticGhostVehicleAttack(V2XAttack):
         scenario_type="intersection",
         route_points=None,
         coordinate_frame="carla",
+        straight_ahead_distance_m=50.0,
         speed_mps=0.0,
         **kwargs,
     ):
@@ -232,6 +233,7 @@ class StaticGhostVehicleAttack(V2XAttack):
         self.scenario_type = scenario_type
         self.route_points = list(route_points or [])
         self.coordinate_frame = coordinate_frame
+        self.straight_ahead_distance_m = float(straight_ahead_distance_m)
         self.speed_mps = float(speed_mps)
         self._ghost_state = None
 
@@ -240,7 +242,8 @@ class StaticGhostVehicleAttack(V2XAttack):
             self.ghost_id = next_available_vehicle_id(vehicle_ids_from_states(vehicles))
         if self._ghost_state is None:
             route_points = self.route_points or _controller_route_points(cosim_client, self.target_vehicle_id)
-            self._ghost_state = self._build_ghost_state(cosim_client, route_points)
+            target = _state_by_id(vehicles, self.target_vehicle_id)
+            self._ghost_state = self._build_ghost_state(cosim_client, route_points, target_state=target)
         if self._ghost_state is None:
             return {"messages": [], "vehicles": [], "events": []}
         messages = _attack_messages(
@@ -254,12 +257,12 @@ class StaticGhostVehicleAttack(V2XAttack):
         )
         return {"messages": messages, "vehicles": [self._ghost_state], "events": []}
 
-    def _build_ghost_state(self, cosim_client, route_points):
+    def _build_ghost_state(self, cosim_client, route_points, target_state=None):
         points = [_location_tuple(point) for point in route_points]
         points = [point for point in points if point is not None]
         if len(points) < 2:
             return None
-        index = self._select_point_index(cosim_client, points)
+        index = self._select_point_index(cosim_client, points, target_state=target_state)
         index = max(0, min(index, len(points) - 2))
         heading = _heading_from_points(points[index], points[index + 1], coordinate_frame=self.coordinate_frame)
         map_name = getattr(getattr(cosim_client, "config", None), "carla_map", None)
@@ -268,14 +271,14 @@ class StaticGhostVehicleAttack(V2XAttack):
             return _local_state(x, y, z, heading, self.speed_mps, self.ghost_id, "static_ghost_attacker", map_name)
         return _carla_to_local_state(points[index], heading, self.speed_mps, self.ghost_id, "static_ghost_attacker", map_name)
 
-    def _select_point_index(self, cosim_client, points):
+    def _select_point_index(self, cosim_client, points, target_state=None):
         scenario_type = str(self.scenario_type or "").lower()
         if scenario_type == "intersection":
             return self._select_intersection_point(cosim_client, points)
         if scenario_type in {"merging", "merge", "roundabout"}:
             return self._select_placeholder_point(points)
         if scenario_type in {"straight", "road"}:
-            return self._select_middle_point(points)
+            return self._select_straight_ahead_point(points, target_state)
         return self._select_middle_point(points)
 
     def _select_intersection_point(self, cosim_client, points):
@@ -290,6 +293,37 @@ class StaticGhostVehicleAttack(V2XAttack):
 
     def _select_placeholder_point(self, points):
         return self._select_middle_point(points)
+
+    def _select_straight_ahead_point(self, points, target_state):
+        if not target_state:
+            return self._select_middle_point(points)
+
+        if self.coordinate_frame == "carla":
+            target = (
+                _to_float(target_state.get("x")),
+                -_to_float(target_state.get("y")),
+                _to_float(target_state.get("z", 0.0)),
+            )
+        else:
+            target = (
+                _to_float(target_state.get("x")),
+                _to_float(target_state.get("y")),
+                _to_float(target_state.get("z", 0.0)),
+            )
+
+        closest_index = min(
+            range(len(points)),
+            key=lambda index: math.hypot(points[index][0] - target[0], points[index][1] - target[1]),
+        )
+        distance = 0.0
+        desired_distance = max(0.0, self.straight_ahead_distance_m)
+        for index in range(closest_index, len(points) - 1):
+            current = points[index]
+            nxt = points[index + 1]
+            distance += math.hypot(nxt[0] - current[0], nxt[1] - current[1])
+            if distance >= desired_distance:
+                return index + 1
+        return max(0, len(points) - 2)
 
     def _select_middle_point(self, points):
         start = int(0.3 * (len(points) - 1))
