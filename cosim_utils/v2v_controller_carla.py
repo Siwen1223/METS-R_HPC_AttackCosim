@@ -55,7 +55,10 @@ class V2VControllerCarla:
         local_planner_sampling_radius=1.0,
         local_planner_base_min_distance=1.5,
         local_planner_distance_ratio=0.2,
+        waypoint_behind_threshold=0.5,
+        control_dt=0.1,
         lane_change_lookahead_s=4.0,
+        lane_change_execution_speed_mps=4.0,
         enable_overtake_lane_change=False,
         enable_debug_draw=False,
         route_project_to_carla_map=True,
@@ -107,7 +110,10 @@ class V2VControllerCarla:
         self.local_planner_sampling_radius = local_planner_sampling_radius
         self.local_planner_base_min_distance = local_planner_base_min_distance
         self.local_planner_distance_ratio = local_planner_distance_ratio
+        self.waypoint_behind_threshold = waypoint_behind_threshold
+        self.control_dt = control_dt
         self.lane_change_lookahead_s = lane_change_lookahead_s
+        self.lane_change_execution_speed_mps = lane_change_execution_speed_mps
         self.enable_overtake_lane_change = enable_overtake_lane_change
         self.enable_debug_draw = enable_debug_draw
         self.route_project_to_carla_map = bool(route_project_to_carla_map)
@@ -118,6 +124,7 @@ class V2VControllerCarla:
         self.v2v_x_key = v2v_x_key
         self.v2v_y_key = v2v_y_key
         self._lane_change_cooldown = 0.0
+        self._last_lane_change_debug = {}
         self.path_planner = path_planner
         if self.path_planner is None and net_path is not None:
             self.path_planner = CosimPathPlanner(self.world, net_path)
@@ -127,9 +134,11 @@ class V2VControllerCarla:
         opt_dict = {
             "ignore_traffic_lights": True,
             "ignore_vehicles": True,
+            "dt": self.control_dt,
             "sampling_radius": self.local_planner_sampling_radius,
             "base_min_distance": self.local_planner_base_min_distance,
             "distance_ratio": self.local_planner_distance_ratio,
+            "waypoint_behind_threshold": self.waypoint_behind_threshold,
         }
         self.agent = BasicAgent(self.vehicle, target_speed=self._to_kmh(target_speed_mps), opt_dict=opt_dict, map_inst=self.map)
         local_planner = self.agent.get_local_planner()
@@ -327,9 +336,16 @@ class V2VControllerCarla:
         path_points = self._path_points()
         attack_influenced_speed = False
         attack_influence_source = ""
-        if self._snap_to_next_path_point_if_needed(path_points):
-            ego_v2v = self._ego_state_record(data_stream)
-            path_points = self._path_points()
+        self._last_lane_change_debug = {
+            "attempted": False,
+            "source": None,
+            "blocker_vid": None,
+            "blocker_distance": None,
+            "status": "disabled" if not self.enable_overtake_lane_change else "not_needed",
+            "direction": None,
+        }
+        # Do not snap the CARLA actor to a route point here. Stale waypoints are handled by LocalPlanner
+        # queue pruning; direct set_transform calls make lane changes look like discontinuous jumps.
 
         # If a turn is coming up, try to move into the appropriate turn lane before the junction.
         self._lane_ensure_turn_alignment(ego_speed, ego_v2v, data_stream)
@@ -395,10 +411,23 @@ class V2VControllerCarla:
                 attack_influenced_speed = True
                 attack_influence_source = "junction_blocker"
 
-        # Optionally try an overtaking lane change if a slow lead vehicle is blocking progress.
+        # Optionally try an overtaking lane change if a slow lead vehicle or path blocker is blocking progress.
+        lane_change_planned = False
         if self.enable_overtake_lane_change:
             # Only consider overtaking when this optional behavior is enabled by the scenario.
-            self._lane_try_overtake(lead, ego_v2v, data_stream)
+            overtake_blocker, overtake_source, overtake_max_distance = self._lane_overtake_blocker(lead, path_blocker)
+            lane_change_planned = self._lane_try_overtake(
+                overtake_blocker,
+                ego_v2v,
+                data_stream,
+                max_distance=overtake_max_distance,
+                source=overtake_source,
+            )
+            if lane_change_planned:
+                desired_speed = max(
+                    desired_speed,
+                    min(self.target_speed_mps, self.lane_change_execution_speed_mps),
+                )
 
         # Cap speed before sharp upcoming turns so the PID follower can stay on the lane centerline.
         curve_speed_cap = self._decision_curve_speed_cap(path_points)
@@ -441,6 +470,12 @@ class V2VControllerCarla:
             "curve_speed_cap": curve_speed_cap,
             "attack_influenced_speed": attack_influenced_speed,
             "attack_influence_source": attack_influence_source,
+            "lane_change_attempted": self._last_lane_change_debug.get("attempted"),
+            "lane_change_source": self._last_lane_change_debug.get("source"),
+            "lane_change_blocker_vid": self._last_lane_change_debug.get("blocker_vid"),
+            "lane_change_blocker_distance": self._last_lane_change_debug.get("blocker_distance"),
+            "lane_change_status": self._last_lane_change_debug.get("status"),
+            "lane_change_direction": self._last_lane_change_debug.get("direction"),
             "path_point_count": len(path_points),
             "control_throttle": control.throttle,
             "control_brake": control.brake,
@@ -820,41 +855,82 @@ class V2VControllerCarla:
         if not self._lane_is_clear(target_lane, ego_v2v, data_stream):
             return
 
-        plan = self._lane_change_plan(target_lane, direction)
+        plan = self._lane_change_plan(ego_wp, direction)
         if plan:
-            self.agent.set_global_plan(plan, clean_queue=True)
+            self.agent.set_global_plan(plan, stop_waypoint_creation=False, clean_queue=True)
             self._lane_change_cooldown = 3.0
 
-    def _lane_try_overtake(self, lead, ego_v2v, data_stream):
+    def _lane_overtake_blocker(self, lead, path_blocker):
         """
-        Attempt an overtaking lane change when enabled and the current lead vehicle is too close.
-        Inputs: Lead-vehicle info, ego V2V record, and full V2V data stream.
+        Select the blocker that should trigger an optional overtaking lane change.
+        Inputs: Same-lane lead vehicle info and path-blocking vehicle info.
+        Outputs: Returns blocker info, source label, and trigger distance.
+        """
+        if path_blocker is not None and (lead is None or lead["distance"] > 15.0):
+            return path_blocker, "path_blocker", self.path_block_max_dist
+        if lead is not None:
+            return lead, "lead", 15.0
+        return None, None, 0.0
+
+    def _lane_try_overtake(self, blocker, ego_v2v, data_stream, max_distance=15.0, source=None):
+        """
+        Attempt an overtaking lane change when enabled and the current blocker is too close.
+        Inputs: Lead/path-blocking vehicle info, ego V2V record, full V2V stream, trigger distance, and source label.
         Outputs: May replace the current agent plan and update the lane-change cooldown.
         """
+        self._last_lane_change_debug.update({
+            "source": source,
+            "blocker_vid": (blocker.get("vehicle") or {}).get("vid") if blocker is not None else None,
+            "blocker_distance": blocker.get("distance") if blocker is not None else None,
+        })
         if self._lane_change_cooldown > 0.0:
-            return
-        if lead is None or lead["distance"] > 15.0:
-            return
+            self._last_lane_change_debug["status"] = "cooldown"
+            return False
+        if blocker is None:
+            self._last_lane_change_debug["status"] = "no_blocker"
+            return False
+        if blocker["distance"] > max_distance:
+            self._last_lane_change_debug["status"] = "blocker_too_far"
+            return False
 
+        self._last_lane_change_debug["attempted"] = True
         ego_wp = self.map.get_waypoint(
             self.vehicle.get_location(),
             project_to_road=True,
             lane_type=carla.LaneType.Driving,
         )
         if ego_wp is None:
-            return
+            self._last_lane_change_debug["status"] = "no_ego_waypoint"
+            return False
 
+        saw_side_lane = False
         for direction in ("left", "right"):
             target_lane = ego_wp.get_left_lane() if direction == "left" else ego_wp.get_right_lane()
             if target_lane is None or target_lane.lane_type != carla.LaneType.Driving:
                 continue
+            saw_side_lane = True
             if not self._lane_is_clear(target_lane, ego_v2v, data_stream):
+                self._last_lane_change_debug["status"] = f"{direction}_not_clear"
                 continue
-            plan = self._lane_change_plan(target_lane, direction)
+            distance_same_lane = min(1.0, max(0.2, float(blocker.get("distance", 0.0)) - 2.0))
+            plan = self._lane_change_plan(
+                ego_wp,
+                direction,
+                distance_same_lane=distance_same_lane,
+                check_lane_marking=False,
+            )
+            if not plan:
+                self._last_lane_change_debug["status"] = f"{direction}_plan_empty"
+                continue
             if plan:
-                self.agent.set_global_plan(plan, clean_queue=True)
+                self.agent.set_global_plan(plan, stop_waypoint_creation=False, clean_queue=True)
                 self._lane_change_cooldown = 3.0
-            break
+                self._last_lane_change_debug["status"] = "planned"
+                self._last_lane_change_debug["direction"] = direction
+                return True
+        if not saw_side_lane:
+            self._last_lane_change_debug["status"] = "no_side_lane"
+        return False
 
     def _lane_change_allowed(self, waypoint, direction):
         """
@@ -901,21 +977,84 @@ class V2VControllerCarla:
                     return False
         return True
 
-    def _lane_change_plan(self, target_lane, direction, steps=25, step_dist=2.0):
+    def _lane_change_plan(
+        self,
+        ego_waypoint,
+        direction,
+        distance_same_lane=8.0,
+        distance_other_lane=30.0,
+        lane_change_distance=25.0,
+        step_dist=2.0,
+        check_lane_marking=True,
+    ):
         """
-        Build a short CARLA waypoint plan that performs a lane change and then follows the new lane.
-        Inputs: Target lane waypoint, lane-change direction, number of follow-up steps, and step distance.
+        Build a smooth CARLA waypoint plan that performs a lane change and then follows the new lane.
+        Inputs: Current ego waypoint, lane-change direction, maneuver distances, and step distance.
         Outputs: Returns a waypoint plan list for BasicAgent.set_global_plan().
         """
-        plan = []
-        wp = target_lane
-        option = RoadOption.CHANGELANELEFT if direction == "left" else RoadOption.CHANGELANERIGHT
-        plan.append((wp, option))
-        for _ in range(steps):
-            nxt = wp.next(step_dist)
-            if not nxt:
+        plan = self.agent._generate_lane_change_path(
+            ego_waypoint,
+            direction,
+            distance_same_lane,
+            distance_other_lane,
+            lane_change_distance,
+            check_lane_marking,
+            1,
+            step_dist,
+        )
+        if plan:
+            return plan
+        return self._lane_change_plan_direct(
+            ego_waypoint,
+            direction,
+            distance_same_lane=distance_same_lane,
+            distance_other_lane=distance_other_lane,
+            step_dist=step_dist,
+        )
+
+    def _lane_change_plan_direct(
+        self,
+        ego_waypoint,
+        direction,
+        distance_same_lane=8.0,
+        distance_other_lane=30.0,
+        step_dist=2.0,
+    ):
+        """
+        Build a lane-change plan from the nearest adjacent lane when CARLA's helper cannot find a side lane farther ahead.
+        Inputs: Current ego waypoint, lane-change direction, same-lane distance, other-lane distance, and step distance.
+        Outputs: Returns a waypoint plan list or an empty list if no adjacent driving lane is available.
+        """
+        plan = [(ego_waypoint, RoadOption.LANEFOLLOW)]
+        wp = ego_waypoint
+        travelled = 0.0
+        while travelled < max(0.0, distance_same_lane):
+            next_wps = wp.next(step_dist)
+            if not next_wps:
                 break
-            wp = nxt[0]
+            next_wp = next_wps[0]
+            travelled += next_wp.transform.location.distance(wp.transform.location)
+            wp = next_wp
+            plan.append((wp, RoadOption.LANEFOLLOW))
+
+        side_wp = wp.get_left_lane() if direction == "left" else wp.get_right_lane()
+        if side_wp is None or side_wp.lane_type != carla.LaneType.Driving:
+            side_wp = ego_waypoint.get_left_lane() if direction == "left" else ego_waypoint.get_right_lane()
+        if side_wp is None or side_wp.lane_type != carla.LaneType.Driving:
+            return []
+
+        option = RoadOption.CHANGELANELEFT if direction == "left" else RoadOption.CHANGELANERIGHT
+        plan.append((side_wp, option))
+
+        wp = side_wp
+        travelled = 0.0
+        while travelled < max(0.0, distance_other_lane):
+            next_wps = wp.next(step_dist)
+            if not next_wps:
+                break
+            next_wp = next_wps[0]
+            travelled += next_wp.transform.location.distance(wp.transform.location)
+            wp = next_wp
             plan.append((wp, RoadOption.LANEFOLLOW))
         return plan
 

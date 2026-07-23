@@ -1,0 +1,45 @@
+scenario_id: "on_ramp_scenario_01"
+name: "Town06 node728 on-ramp merge"
+scenario_type: "merging"
+
+town: "Town06"
+network_file: "data/CARLA/Town06/facility/road/Town06.net.xml"
+config_file: "configs/run_cosim_CARLAT6.json"
+
+merging_point_center_xy_carla: [240.35, 49.83]
+
+roads:
+  mainline:
+    incoming: ["-16", "-25"]
+    outgoing: ["-28", "-29#0"]
+  on_ramp:
+    incoming: ["2", "45"]
+    outgoing: ["-29#0"]
+
+lanes:
+  "-16": ["-16_2", "-16_3", "-16_4", "-16_5"]
+  "-25": ["-25_2", "-25_3", "-25_4", "-25_5"]
+  "-28": ["-28_2", "-28_3", "-28_4", "-28_5"]
+  "-29#0": ["-29#0_2", "-29#0_3", "-29#0_4", "-29#0_5"]
+
+movements:
+  mainline: {origin: "-16", destination: "-29#0", maneuver: straight}
+  on_ramp: {origin: "2", destination: "-29#0", maneuver: merging}
+
+cosim_roads:
+  - "-16"
+  - "-25"
+  - "-28"
+  - "-29#0"
+  - "2"
+  - "45"
+
+traffic_lights:
+  enabled: false
+
+right_of_way:
+  type: merge
+  priority: mainline
+  yield: on_ramp
+
+notes: "Town06 node728 on-ramp merge scenario. Mainline traffic has priority over vehicles entering from the on-ramp."

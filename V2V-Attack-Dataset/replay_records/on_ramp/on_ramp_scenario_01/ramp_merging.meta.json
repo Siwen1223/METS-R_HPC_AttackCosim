@@ -1,0 +1,16 @@
+{
+  "record_type": "on_ramp_replay_bsm_trajectory",
+  "scenario_id": "on_ramp_scenario_01",
+  "scenario_path": "/home/siwen/Software/METS-R_docker/METS-R_HPC/V2V-Attack-Dataset/scenarios/on_ramp/on_ramp_scenario_01.yaml",
+  "movement": "on_ramp",
+  "maneuver": "merging",
+  "origin": "2",
+  "destination": "-29#0",
+  "vehicle_id": 1,
+  "target_speed_mps": 10.0,
+  "sim_step_size": 0.1,
+  "record_count": 193,
+  "first_source_tick": 1,
+  "last_source_tick": 193,
+  "output": "/home/siwen/Software/METS-R_docker/METS-R_HPC/V2V-Attack-Dataset/replay_records/on_ramp/on_ramp_scenario_01/ramp_merging.jsonl"
+}

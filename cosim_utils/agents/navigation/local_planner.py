@@ -53,6 +53,7 @@ class LocalPlanner:
             max_brake: maximum brake applied to the vehicle
             max_steering: maximum steering applied to the vehicle
             offset: distance between the route waypoints and the center of the lane
+            waypoint_behind_threshold: forward projection threshold below which a waypoint is treated as passed
         :param map_inst: carla.Map instance to avoid the expensive call of getting it.
         """
         self._vehicle = vehicle
@@ -86,6 +87,7 @@ class LocalPlanner:
         self._offset = 0
         self._base_min_distance = 3.0
         self._distance_ratio = 0.5
+        self._waypoint_behind_threshold = 0.5
         self._follow_speed_limits = False
 
         # Overload parameters
@@ -112,8 +114,14 @@ class LocalPlanner:
                 self._base_min_distance = opt_dict['base_min_distance']
             if 'distance_ratio' in opt_dict:
                 self._distance_ratio = opt_dict['distance_ratio']
+            if 'waypoint_behind_threshold' in opt_dict:
+                self._waypoint_behind_threshold = opt_dict['waypoint_behind_threshold']
             if 'follow_speed_limits' in opt_dict:
                 self._follow_speed_limits = opt_dict['follow_speed_limits']
+        self._args_lateral_dict.setdefault('dt', self._dt)
+        self._args_longitudinal_dict.setdefault('dt', self._dt)
+        self._args_lateral_dict['dt'] = self._dt
+        self._args_longitudinal_dict['dt'] = self._dt
 
         # initializing controller
         self._init_controller()
@@ -237,6 +245,7 @@ class LocalPlanner:
 
         # Purge the queue of obsolete waypoints
         veh_location = self._vehicle.get_location()
+        veh_forward = self._vehicle.get_transform().get_forward_vector()
         vehicle_speed = get_speed(self._vehicle) / 3.6
         self._min_distance = self._base_min_distance + self._distance_ratio * vehicle_speed
 
@@ -248,7 +257,15 @@ class LocalPlanner:
             else:
                 min_distance = self._min_distance
 
-            if veh_location.distance(waypoint.transform.location) < min_distance:
+            waypoint_location = waypoint.transform.location
+            longitudinal = (
+                (waypoint_location.x - veh_location.x) * veh_forward.x
+                + (waypoint_location.y - veh_location.y) * veh_forward.y
+            )
+            if (
+                veh_location.distance(waypoint_location) < min_distance
+                or longitudinal < self._waypoint_behind_threshold
+            ):
                 num_waypoint_removed += 1
             else:
                 break

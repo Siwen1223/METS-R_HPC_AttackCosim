@@ -27,6 +27,7 @@ MOVEMENT_NAMES = ("east_to_west", "east_to_west", "east_to_west", "south_to_west
 CAMERA_HEIGHT = 120
 RANDOM_SEED = 42
 TRAFFIC_DENSITY = "middle_density"
+INTERACTION_COMPLEXITY = "moderately_complex_interaction"
 WEATHER = "clear"
 MAX_STEPS = 400
 WARMUP_STEPS = 0
@@ -145,6 +146,7 @@ def main():
                 "map": getattr(config, "carla_map", scenario.get("town", "")),
                 "scenario": str(SCENARIO_PATH),
                 "scenario_variant": CASE_NAME,
+                "interaction_complexity": INTERACTION_COMPLEXITY,
                 "traffic_density": TRAFFIC_DENSITY,
                 "vehicle_route": vehicle_route,
                 "weather": WEATHER,

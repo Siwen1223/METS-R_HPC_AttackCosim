@@ -293,6 +293,7 @@ class V2VCoSimClientMaster(CoSimClient):
             if getattr(self.config, "network_file", None)
             else None,
             "target_speed_mps": float(getattr(self.config, "v2v_target_speed_mps", 10.0)),
+            "control_dt": self.dt,
             "enable_debug_draw": bool(getattr(self.config, "enable_debug_draw", False)),
             "v2v_position_mode": getattr(self.config, "v2v_position_mode", "local"),
             "preferred_lane_ids": self._preferred_lane_ids(vid),
