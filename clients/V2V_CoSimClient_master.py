@@ -198,7 +198,10 @@ class V2VCoSimClientMaster(CoSimClient):
                     print(f"Vehicle {cosim_id} switched from display-only to CARLA-managed.")
                     self.destroy_carla_vehicle(cosim_id)
                 self.carla_coordMaps[cosim_id] = cosim_meta_map[cosim_id].get("coord_map", [])
-                self.carla_route[cosim_id] = cosim_meta_map[cosim_id].get("route", [])
+                self.carla_route[cosim_id] = self._route_ids_from_preferred_lanes(
+                    cosim_id,
+                    cosim_meta_map[cosim_id].get("route", []),
+                )
                 route = self.carla_route[cosim_id]
                 self.carla_destRoad[cosim_id] = route[-1] if route else None
                 handoff_loc = self.get_carla_location(veh_info["x"], veh_info["y"])
@@ -267,6 +270,27 @@ class V2VCoSimClientMaster(CoSimClient):
         if str(vid) in lane_paths:
             return list(lane_paths[str(vid)])
         return []
+
+    def _route_ids_from_preferred_lanes(self, vid, fallback_route):
+        lane_ids = self._preferred_lane_ids(vid)
+        if not lane_ids:
+            return list(fallback_route or [])
+
+        route_ids = []
+        for lane_id in lane_ids:
+            edge_id = str(lane_id).rsplit("_", 1)[0]
+            if edge_id and (not route_ids or route_ids[-1] != edge_id):
+                route_ids.append(edge_id)
+
+        if len(route_ids) < 2:
+            return list(fallback_route or [])
+
+        fallback = [str(route_id) for route_id in (fallback_route or [])]
+        if fallback and route_ids[0] != fallback[0]:
+            return fallback
+        if fallback and fallback[-1] not in route_ids:
+            return fallback
+        return route_ids
 
     def _vehicle_for_sensor(self, vid):
         return self.carla_vehs.get(vid) or self.displayOnly_vehs.get(vid)

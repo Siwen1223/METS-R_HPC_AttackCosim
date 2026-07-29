@@ -19,8 +19,12 @@ def start_simu5g_bridge_in_terminal(
     if not run_script.exists():
         raise FileNotFoundError(f"Simu5G run script not found: {run_script}")
 
+    env_file = os.environ.get("METSR_SIMU5G_ENV") or str(bridge_dir / "simu5g_env.local.sh")
     shell_command = (
-        'source "$OMNETPP_HOME/setenv"; '
+        f'if [ -f "{env_file}" ]; then source "{env_file}"; fi; '
+        'if [ -z "${OMNETPP_HOME:-}" ] || [ ! -f "$OMNETPP_HOME/setenv" ]; then '
+        'echo "OMNETPP_HOME is not set correctly. Set METSR_SIMU5G_ENV or create simu5g_env.local.sh."; '
+        'else source "$OMNETPP_HOME/setenv"; fi; '
         f'cd "{bridge_dir}"; '
         "bash ./run_sim5g_uu.sh"
     )

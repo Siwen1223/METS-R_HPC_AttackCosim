@@ -54,6 +54,7 @@ class LocalPlanner:
             max_steering: maximum steering applied to the vehicle
             offset: distance between the route waypoints and the center of the lane
             waypoint_behind_threshold: forward projection threshold below which a waypoint is treated as passed
+            waypoint_behind_max_prune_distance: max distance for removing a waypoint only because it is behind
         :param map_inst: carla.Map instance to avoid the expensive call of getting it.
         """
         self._vehicle = vehicle
@@ -88,6 +89,7 @@ class LocalPlanner:
         self._base_min_distance = 3.0
         self._distance_ratio = 0.5
         self._waypoint_behind_threshold = 0.5
+        self._waypoint_behind_max_prune_distance = 8.0
         self._follow_speed_limits = False
 
         # Overload parameters
@@ -116,6 +118,8 @@ class LocalPlanner:
                 self._distance_ratio = opt_dict['distance_ratio']
             if 'waypoint_behind_threshold' in opt_dict:
                 self._waypoint_behind_threshold = opt_dict['waypoint_behind_threshold']
+            if 'waypoint_behind_max_prune_distance' in opt_dict:
+                self._waypoint_behind_max_prune_distance = opt_dict['waypoint_behind_max_prune_distance']
             if 'follow_speed_limits' in opt_dict:
                 self._follow_speed_limits = opt_dict['follow_speed_limits']
         self._args_lateral_dict.setdefault('dt', self._dt)
@@ -251,20 +255,26 @@ class LocalPlanner:
 
         num_waypoint_removed = 0
         for waypoint, _ in self._waypoints_queue:
+            is_last_waypoint = len(self._waypoints_queue) - num_waypoint_removed == 1
 
-            if len(self._waypoints_queue) - num_waypoint_removed == 1:
+            if is_last_waypoint:
                 min_distance = 1  # Don't remove the last waypoint until very close by
             else:
                 min_distance = self._min_distance
 
             waypoint_location = waypoint.transform.location
+            waypoint_distance = veh_location.distance(waypoint_location)
             longitudinal = (
                 (waypoint_location.x - veh_location.x) * veh_forward.x
                 + (waypoint_location.y - veh_location.y) * veh_forward.y
             )
             if (
-                veh_location.distance(waypoint_location) < min_distance
-                or longitudinal < self._waypoint_behind_threshold
+                waypoint_distance < min_distance
+                or (
+                    not is_last_waypoint
+                    and longitudinal < self._waypoint_behind_threshold
+                    and waypoint_distance <= self._waypoint_behind_max_prune_distance
+                )
             ):
                 num_waypoint_removed += 1
             else:

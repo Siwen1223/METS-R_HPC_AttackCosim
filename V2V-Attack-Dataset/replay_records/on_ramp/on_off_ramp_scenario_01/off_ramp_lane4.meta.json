@@ -1,0 +1,21 @@
+{
+  "record_type": "on_off_ramp_replay_bsm_trajectory",
+  "scenario_id": "on_off_ramp_scenario_01",
+  "scenario_path": "/home/siwen/Software/METS-R_docker/METS-R_HPC/V2V-Attack-Dataset/scenarios/on_ramp/on_off_ramp_scenario_01.yaml",
+  "movement": "off_ramp",
+  "maneuver": "diverging",
+  "origin": "-17",
+  "destination": "-9",
+  "lane_path": [
+    "-17_4",
+    "-18_6",
+    "-9_2"
+  ],
+  "vehicle_id": 1,
+  "target_speed_mps": 10.0,
+  "sim_step_size": 0.1,
+  "record_count": 330,
+  "first_source_tick": 1,
+  "last_source_tick": 330,
+  "output": "/home/siwen/Software/METS-R_docker/METS-R_HPC/V2V-Attack-Dataset/replay_records/on_ramp/on_off_ramp_scenario_01/off_ramp_lane4.jsonl"
+}

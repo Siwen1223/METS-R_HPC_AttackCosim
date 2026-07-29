@@ -83,7 +83,14 @@ class CosimPathPlanner:
         if start_lane_id is None:
             return []
 
-        lane_path = self._build_lane_path(start_lane_id, route_ids)
+        preferred_lane_path = self._preferred_lane_path(
+            preferred_lane_ids,
+            route_ids,
+            start_lane_id=start_lane_id,
+        )
+        lane_path = preferred_lane_path
+        if not lane_path:
+            lane_path = self._build_lane_path(start_lane_id, route_ids)
         if not lane_path:
             return []
 
@@ -91,6 +98,7 @@ class CosimPathPlanner:
         lane_points_carla = self._sample_lane_path_locations(
             lane_path,
             self._carla_to_metsr(start_point_carla),
+            bridge_gaps_with_grp=not bool(preferred_lane_path),
         )
         if not lane_points_carla:
             return []
@@ -122,9 +130,10 @@ class CosimPathPlanner:
             return None
         reference_metsr = self._carla_to_metsr(reference_carla_location) if reference_carla_location is not None else None
         start_lane_id = self._preferred_start_lane(preferred_lane_ids, route_ids)
-        if start_lane_id is not None:
+        lane_path = self._preferred_lane_path(preferred_lane_ids, route_ids)
+        if not lane_path and start_lane_id is not None:
             lane_path = self._build_lane_path(start_lane_id, route_ids)
-        else:
+        if not lane_path:
             lane_path = self._select_route_lane_path(route_ids, reference_metsr=reference_metsr)
         if not lane_path:
             return None
@@ -154,6 +163,56 @@ class CosimPathPlanner:
             if lane["edge_id"] in route_set:
                 return lane_id
         return None
+
+    def _preferred_lane_path(self, preferred_lane_ids, route_ids, start_lane_id=None):
+        if not preferred_lane_ids:
+            return []
+
+        expanded_route_edges = self._expanded_route_edges(route_ids)
+        if not expanded_route_edges:
+            return []
+        route_index = {edge_id: index for index, edge_id in enumerate(expanded_route_edges)}
+
+        lane_path = []
+        lane_edge_indices = []
+        for raw_lane_id in preferred_lane_ids:
+            lane_id = str(raw_lane_id)
+            lane = self.lanes.get(lane_id)
+            if lane is None or lane["is_internal"] or not lane["is_driving"]:
+                continue
+            edge_id = lane["edge_id"]
+            if edge_id not in route_index:
+                continue
+            if lane_path and lane_path[-1] == lane_id:
+                continue
+            lane_path.append(lane_id)
+            lane_edge_indices.append(route_index[edge_id])
+
+        if len(lane_path) < 2:
+            return []
+        if start_lane_id is not None and lane_path[0] != start_lane_id:
+            return []
+        if lane_edge_indices[0] != 0 or lane_edge_indices[-1] != len(expanded_route_edges) - 1:
+            return []
+        if any(next_idx < cur_idx for cur_idx, next_idx in zip(lane_edge_indices, lane_edge_indices[1:])):
+            return []
+        return lane_path
+
+    def _expanded_route_edges(self, route_ids):
+        route_ids = [str(route_id) for route_id in route_ids if str(route_id) in self.edges]
+        if len(route_ids) <= 1:
+            return route_ids
+
+        expanded = []
+        for current_edge, next_edge in zip(route_ids[:-1], route_ids[1:]):
+            segment = self._shortest_edge_path(current_edge, next_edge)
+            if not segment:
+                return []
+            if expanded and expanded[-1] == segment[0]:
+                expanded.extend(segment[1:])
+            else:
+                expanded.extend(segment)
+        return expanded
 
     def build_carla_routepoints_from_metsr(self, route_ids, centerline_response, sampling_locs=(0.2, 0.5, 0.8)):
         """
@@ -472,7 +531,7 @@ class CosimPathPlanner:
                 heappush(heap, (next_cost, next_lane_id, next_path))
         return None
 
-    def _sample_lane_path_locations(self, lane_path, start_point_metsr, step=2.0):
+    def _sample_lane_path_locations(self, lane_path, start_point_metsr, step=2.0, bridge_gaps_with_grp=True):
         locations = []
         previous_end = None
         for idx, lane_id in enumerate(lane_path):
@@ -486,7 +545,7 @@ class CosimPathPlanner:
 
             if previous_end is not None:
                 gap = self._distance_2d(previous_end, shape[0])
-                if gap > self.gap_trace_threshold and self.grp is not None:
+                if gap > self.gap_trace_threshold and self.grp is not None and bridge_gaps_with_grp:
                     self._append_grp_gap_locations(locations, previous_end, shape[0])
                 elif gap > 1e-3:
                     self._append_metsr_locations(

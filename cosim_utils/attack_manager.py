@@ -224,6 +224,7 @@ class StaticGhostVehicleAttack(V2XAttack):
         route_points=None,
         coordinate_frame="carla",
         merging_point_center_xy_carla=None,
+        diverging_point_center_xy_carla=None,
         straight_ahead_distance_m=50.0,
         speed_mps=0.0,
         **kwargs,
@@ -237,6 +238,11 @@ class StaticGhostVehicleAttack(V2XAttack):
         self.merging_point_center_xy_carla = (
             tuple(merging_point_center_xy_carla)
             if merging_point_center_xy_carla is not None
+            else None
+        )
+        self.diverging_point_center_xy_carla = (
+            tuple(diverging_point_center_xy_carla)
+            if diverging_point_center_xy_carla is not None
             else None
         )
         self.straight_ahead_distance_m = float(straight_ahead_distance_m)
@@ -283,6 +289,8 @@ class StaticGhostVehicleAttack(V2XAttack):
             return self._select_intersection_point(cosim_client, points)
         if scenario_type in {"merging", "merge", "roundabout"}:
             return self._select_merging_point(points)
+        if scenario_type in {"diverging", "diverge", "off_ramp", "off-ramp"}:
+            return self._select_diverging_point(points)
         if scenario_type in {"straight", "road"}:
             return self._select_straight_ahead_point(points, target_state)
         return self._select_middle_point(points)
@@ -308,6 +316,17 @@ class StaticGhostVehicleAttack(V2XAttack):
         closest_index = min(
             range(len(points)),
             key=lambda index: math.hypot(points[index][0] - merge_x, points[index][1] - merge_y),
+        )
+        return max(0, min(closest_index - 1, len(points) - 2))
+
+    def _select_diverging_point(self, points):
+        if self.diverging_point_center_xy_carla is None:
+            return self._select_middle_point(points)
+        diverge_x = _to_float(self.diverging_point_center_xy_carla[0])
+        diverge_y = _to_float(self.diverging_point_center_xy_carla[1])
+        closest_index = min(
+            range(len(points)),
+            key=lambda index: math.hypot(points[index][0] - diverge_x, points[index][1] - diverge_y),
         )
         return max(0, min(closest_index - 1, len(points) - 2))
 

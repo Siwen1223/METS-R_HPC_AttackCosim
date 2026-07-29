@@ -56,6 +56,7 @@ class V2VControllerCarla:
         local_planner_base_min_distance=1.5,
         local_planner_distance_ratio=0.2,
         waypoint_behind_threshold=0.5,
+        waypoint_behind_max_prune_distance=8.0,
         control_dt=0.1,
         lane_change_lookahead_s=4.0,
         lane_change_execution_speed_mps=4.0,
@@ -111,6 +112,7 @@ class V2VControllerCarla:
         self.local_planner_base_min_distance = local_planner_base_min_distance
         self.local_planner_distance_ratio = local_planner_distance_ratio
         self.waypoint_behind_threshold = waypoint_behind_threshold
+        self.waypoint_behind_max_prune_distance = waypoint_behind_max_prune_distance
         self.control_dt = control_dt
         self.lane_change_lookahead_s = lane_change_lookahead_s
         self.lane_change_execution_speed_mps = lane_change_execution_speed_mps
@@ -139,6 +141,7 @@ class V2VControllerCarla:
             "base_min_distance": self.local_planner_base_min_distance,
             "distance_ratio": self.local_planner_distance_ratio,
             "waypoint_behind_threshold": self.waypoint_behind_threshold,
+            "waypoint_behind_max_prune_distance": self.waypoint_behind_max_prune_distance,
         }
         self.agent = BasicAgent(self.vehicle, target_speed=self._to_kmh(target_speed_mps), opt_dict=opt_dict, map_inst=self.map)
         local_planner = self.agent.get_local_planner()
@@ -493,7 +496,12 @@ class V2VControllerCarla:
         Inputs: No additional inputs.
         Outputs: Returns True if the BasicAgent has finished its route, otherwise False.
         """
-        return self.agent.done()
+        if not self.agent.done():
+            return False
+        if not self._route_points:
+            return True
+        current_loc = self.vehicle.get_location()
+        return current_loc.distance(self._route_points[-1]) <= 8.0
 
     def get_last_debug_state(self):
         """
