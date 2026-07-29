@@ -1,0 +1,47 @@
+scenario_id: "on_off_ramp_scenario_01"
+name: "Town06 edge-18 on_off-ramp"
+scenario_type: "merging and diverging"
+
+town: "Town06"
+network_file: "data/CARLA/Town06/facility/road/Town06.net.xml"
+config_file: "configs/run_cosim_CARLAT6.json"
+
+merging_point_center_xy_carla: [-164.23, 244.45]
+
+roads:
+  mainline:
+    incoming: ["-17"]
+    outgoing: ["-19"]
+  on_ramp:
+    incoming: ["43"]
+    outgoing: ["-19"]
+  off_ramp:
+    incoming: ["-17"]
+    outgoing: ["-9"]
+
+lanes:
+  "-17": ["-17_2", "-17_3", "-17_4", "-17_5"]
+  "-18": ["-18_2", "-18_3", "-18_4", "-18_5", "-18_6"]
+  "-19": ["-19_2", "-19_3", "-19_4", "-19_5"]
+
+movements:
+  mainline: {origin: "-17", destination: "-19", maneuver: straight}
+  on_ramp: {origin: "43", destination: "-19", maneuver: merging}
+  off_ramp: {origin: "-17", destination: "-9", maneuver: diverging}
+
+cosim_roads:
+  - "-17"
+  - "-18"
+  - "-19"
+  - "43"
+  - "-9"
+
+traffic_lights:
+  enabled: false
+
+right_of_way:
+  type: merge and diverge
+  priority: mainline
+  yield: on_ramp
+
+notes: ""
