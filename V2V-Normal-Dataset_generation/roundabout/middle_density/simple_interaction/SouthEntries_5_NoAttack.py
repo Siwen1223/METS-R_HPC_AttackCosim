@@ -1,4 +1,4 @@
-"""On/off-ramp scenario 01 middle-density complicated interaction: six vehicles without attack."""
+"""Roundabout middle-density simple interaction: five south-entry vehicles without attack."""
 
 import sys
 import time
@@ -20,29 +20,18 @@ from utils.simu5g_v2x_util import start_simu5g_bridge_in_terminal
 from utils.util import prepare_sim_dirs, read_run_config, run_simulation_in_docker
 
 
-CASE_NAME = "OnOffRamp_6_NoAttack"
-SCENARIO_PATH = ROOT_DIR / "V2V-Attack-Dataset/scenarios/on_ramp/on_off_ramp_scenario_01.yaml"
+CASE_NAME = "SouthEntries_5_NoAttack"
+SCENARIO_PATH = ROOT_DIR / "V2V-Attack-Dataset/scenarios/roundabout/roundabout_scenario_01.yaml"
 DATASET_ROOT = ROOT_DIR / "V2V-Attack-Dataset"
-MOVEMENT_NAMES = ("on_ramp", "on_ramp", "mainline", "mainline", "off_ramp", "off_ramp")
-LANE_PATHS = {
-    1: ["43_2", "-18_6", "-18_5", "-19_5"],
-    2: ["43_2", "-18_6", "-18_5", "-19_5"],
-    3: ["-17_4", "-18_4", "-19_4"],
-    4: ["-17_5", "-18_5", "-19_5"],
-    5: ["-17_4", "-18_4", "-18_5", "-18_6", "-9_2"],
-    6: ["-17_5", "-18_5", "-18_6", "-9_2"],
-}
-SCENE_CENTER_XY_CARLA = [-143.0, 239.0]
-CAMERA_HEIGHT = 160
+MOVEMENT_NAMES = ("south_to_east", "south_to_west", "south_to_north", "south_to_east", "south_to_west")
+CAMERA_HEIGHT = 150
 RANDOM_SEED = 42
 TRAFFIC_DENSITY = "middle_density"
-INTERACTION_COMPLEXITY = "complicated_interaction"
+INTERACTION_COMPLEXITY = "simple_interaction"
 WEATHER = "clear"
-MAX_STEPS = 650
+MAX_STEPS = 500
 WARMUP_STEPS = 0
-SAME_START_LANE_DEPARTURE_GAP_TICKS = 30
-FIRST_ON_RAMP_DEPARTURE_TICK = 60
-SECOND_ON_RAMP_DEPARTURE_TICK = 90
+SAME_ROUTE_DEPARTURE_GAP_TICKS = 20
 
 
 def no_attack_metadata():
@@ -61,8 +50,7 @@ def configure_run(scenario):
     config.carla_tick_timeout = 5.0
     config.metsr_tick_timeout = 5.0
     config.release_queued_cosim_vehicles = True
-    config.controller_lane_paths = LANE_PATHS
-    config.controller_kwargs = {"route_project_to_carla_map": False}
+    config.handoff_spawn_clearance_m = 10.0
     config.camera_layout = "front_rear"
     config.camera_interval_ticks = 5
     config.lidar_interval_ticks = 10
@@ -94,41 +82,19 @@ def run_one_step(cosim_client, data_saver, controller_vids, run_start_tick, dt, 
     time.sleep(0.08)
 
 
-def trip_start_lane(vid, road_from):
-    lane_path = LANE_PATHS.get(vid)
-    if lane_path:
-        return lane_path[0]
-    return road_from
-
-
-def generate_one_trip(cosim_client, trip_spec, last_generated_tick_by_start_lane, data_saver, controller_vids, run_start_tick, dt, state):
-    vid, road_from, road_to, movement_name = trip_spec
-    lane_key = trip_start_lane(vid, road_from)
-    while (
-        lane_key in last_generated_tick_by_start_lane
-        and cosim_client.current_tick - last_generated_tick_by_start_lane[lane_key] < SAME_START_LANE_DEPARTURE_GAP_TICKS
-    ):
-        run_one_step(cosim_client, data_saver, controller_vids, run_start_tick, dt, state)
-    print(f"Generating trip veh={vid} movement={movement_name}: {road_from} -> {road_to} lane_path={LANE_PATHS.get(vid)}")
-    cosim_client.metsr.generate_trip_between_roads([vid], road_from, road_to)
-    cosim_client.metsr.update_vehicle_sensor_type([vid], "cv2x", True)
-    last_generated_tick_by_start_lane[lane_key] = cosim_client.current_tick
-
-
-def wait_until_relative_tick(cosim_client, target_relative_tick, data_saver, controller_vids, run_start_tick, dt, state):
-    while cosim_client.current_tick - run_start_tick < target_relative_tick:
-        run_one_step(cosim_client, data_saver, controller_vids, run_start_tick, dt, state)
-
-
 def generate_trips_with_gaps(cosim_client, trip_specs, data_saver, controller_vids, run_start_tick, dt, state):
-    trip_by_vid = {vid: (vid, road_from, road_to, movement_name) for vid, road_from, road_to, movement_name in trip_specs}
-    last_generated_tick_by_start_lane = {}
-    for vid in (3, 4, 5, 6):
-        generate_one_trip(cosim_client, trip_by_vid[vid], last_generated_tick_by_start_lane, data_saver, controller_vids, run_start_tick, dt, state)
-    wait_until_relative_tick(cosim_client, FIRST_ON_RAMP_DEPARTURE_TICK, data_saver, controller_vids, run_start_tick, dt, state)
-    generate_one_trip(cosim_client, trip_by_vid[1], last_generated_tick_by_start_lane, data_saver, controller_vids, run_start_tick, dt, state)
-    wait_until_relative_tick(cosim_client, SECOND_ON_RAMP_DEPARTURE_TICK, data_saver, controller_vids, run_start_tick, dt, state)
-    generate_one_trip(cosim_client, trip_by_vid[2], last_generated_tick_by_start_lane, data_saver, controller_vids, run_start_tick, dt, state)
+    last_generated_tick_by_origin = {}
+    for vid, road_from, road_to, movement_name in trip_specs:
+        origin = road_from
+        while (
+            origin in last_generated_tick_by_origin
+            and cosim_client.current_tick - last_generated_tick_by_origin[origin] < SAME_ROUTE_DEPARTURE_GAP_TICKS
+        ):
+            run_one_step(cosim_client, data_saver, controller_vids, run_start_tick, dt, state)
+        print(f"Generating trip veh={vid} movement={movement_name}: {road_from} -> {road_to}")
+        cosim_client.metsr.generate_trip_between_roads([vid], road_from, road_to)
+        cosim_client.metsr.update_vehicle_sensor_type([vid], "cv2x", True)
+        last_generated_tick_by_origin[origin] = cosim_client.current_tick
 
 
 def main():
@@ -193,7 +159,7 @@ def main():
             no_attack_metadata(),
         )
         data_saver.log_event(0.0, f"run initialized: {CASE_NAME}")
-        camera_x, camera_y = scenario.get("scene_center_xy_carla", SCENE_CENTER_XY_CARLA)
+        camera_x, camera_y = scenario.get("intersection_center_xy_carla", [0, 0])
         cosim_client.set_custom_camera(camera_x, camera_y, CAMERA_HEIGHT)
 
         state = {"previous_entered": set(), "duration_sec": None}
@@ -201,11 +167,9 @@ def main():
         while cosim_client.current_tick - run_start_tick < MAX_STEPS:
             run_one_step(cosim_client, data_saver, controller_vids, run_start_tick, dt, state)
     except KeyboardInterrupt:
-        print()
-        print("Simulation interrupted by user")
+        print("\nSimulation interrupted by user")
     except Exception:
-        print()
-        print("Simulation failed with exception:", flush=True)
+        print("\nSimulation failed with exception:", flush=True)
         traceback.print_exc()
     finally:
         if data_saver is not None:

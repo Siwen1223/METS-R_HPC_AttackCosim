@@ -95,11 +95,16 @@ class CosimPathPlanner:
             return []
 
         self.selected_lane_path = lane_path
-        lane_points_carla = self._sample_lane_path_locations(
-            lane_path,
-            self._carla_to_metsr(start_point_carla),
-            bridge_gaps_with_grp=not bool(preferred_lane_path),
-        )
+        if preferred_lane_path:
+            lane_points_carla = self._sample_preferred_lane_path_locations(
+                lane_path,
+                self._carla_to_metsr(start_point_carla),
+            )
+        else:
+            lane_points_carla = self._sample_lane_path_locations(
+                lane_path,
+                self._carla_to_metsr(start_point_carla),
+            )
         if not lane_points_carla:
             return []
 
@@ -557,6 +562,144 @@ class CosimPathPlanner:
             previous_end = shape[-1]
         return locations
 
+    def _sample_preferred_lane_path_locations(self, lane_path, start_point_metsr, step=2.0):
+        locations = []
+        groups = self._lane_path_edge_groups(lane_path)
+        previous_last_lane_id = None
+        for group_idx, group_lane_ids in enumerate(groups):
+            if previous_last_lane_id is not None:
+                bridge_points = self._lane_connection_bridge_points(previous_last_lane_id, group_lane_ids[0], step=step)
+                if bridge_points:
+                    self._append_metsr_locations(locations, bridge_points)
+                else:
+                    previous_shape = self.lanes[previous_last_lane_id]["shape_metsr"]
+                    current_shape = self.lanes[group_lane_ids[0]]["shape_metsr"]
+                    if previous_shape and current_shape:
+                        self._append_metsr_locations(
+                            locations,
+                            self._resample_polyline([previous_shape[-1], current_shape[0]], step=step),
+                        )
+
+            group_start = start_point_metsr if group_idx == 0 else None
+            group_points = self._sample_same_edge_lane_group(group_lane_ids, start_point_metsr=group_start, step=step)
+            if group_points:
+                self._append_metsr_locations(locations, group_points)
+            previous_last_lane_id = group_lane_ids[-1]
+        return locations
+
+    def _lane_path_edge_groups(self, lane_path):
+        groups = []
+        current_group = []
+        current_edge = None
+        for lane_id in lane_path:
+            lane = self.lanes.get(lane_id)
+            if lane is None:
+                continue
+            edge_id = lane["edge_id"]
+            if current_group and edge_id != current_edge:
+                groups.append(current_group)
+                current_group = []
+            current_group.append(lane_id)
+            current_edge = edge_id
+        if current_group:
+            groups.append(current_group)
+        return groups
+
+    def _sample_same_edge_lane_group(self, lane_ids, start_point_metsr=None, step=2.0):
+        if not lane_ids:
+            return []
+        if len(lane_ids) == 1:
+            shape = list(self.lanes[lane_ids[0]]["shape_metsr"])
+            if start_point_metsr is not None:
+                shape = self._clip_polyline_from_point(shape, start_point_metsr)
+            return self._resample_polyline(shape, step=step)
+
+        lane_shapes = [self.lanes[lane_id]["shape_metsr"] for lane_id in lane_ids]
+        if any(len(shape) < 2 for shape in lane_shapes):
+            return []
+
+        base_shape = lane_shapes[0]
+        start_fraction = 0.0
+        if start_point_metsr is not None:
+            _, _, seg_idx, seg_t = self._distance_to_polyline(start_point_metsr, base_shape)
+            start_fraction = self._polyline_fraction_at_segment(base_shape, seg_idx, seg_t)
+
+        base_length = max(self._polyline_length(base_shape), 1e-6)
+        fraction_step = max(0.01, float(step) / base_length)
+        fractions = []
+        value = start_fraction
+        while value < 1.0:
+            fractions.append(value)
+            value += fraction_step
+        if not fractions or fractions[-1] < 1.0:
+            fractions.append(1.0)
+
+        transition_start = min(0.35, start_fraction + 0.05)
+        transition_end = max(transition_start + 0.15, 0.88)
+        if start_fraction > transition_start:
+            transition_start = start_fraction
+            transition_end = min(1.0, max(start_fraction + 0.2, transition_end))
+
+        points = []
+        max_lane_pos = len(lane_shapes) - 1
+        for fraction in fractions:
+            if transition_end <= transition_start:
+                progress = 1.0
+            else:
+                progress = (fraction - transition_start) / (transition_end - transition_start)
+            progress = max(0.0, min(1.0, progress))
+            progress = progress * progress * (3.0 - 2.0 * progress)
+            lane_pos = progress * max_lane_pos
+            lower_idx = int(math.floor(lane_pos))
+            upper_idx = min(max_lane_pos, lower_idx + 1)
+            lane_blend = lane_pos - lower_idx
+            lower_point, _ = self._point_at_fraction(lane_shapes[lower_idx], fraction)
+            upper_point, _ = self._point_at_fraction(lane_shapes[upper_idx], fraction)
+            if lower_point is None or upper_point is None:
+                continue
+            points.append(self._interpolate_point(lower_point, upper_point, lane_blend))
+        return self._dedupe_metsr_points(points)
+
+    def _lane_connection_bridge_points(self, from_lane_id, to_lane_id, step=2.0):
+        path = self._shortest_path_to_lane(from_lane_id, to_lane_id, max_visits=12)
+        if not path:
+            return []
+        points = []
+        for lane_id in path[1:-1]:
+            lane = self.lanes.get(lane_id)
+            if lane is None or not lane["is_internal"]:
+                continue
+            points.extend(self._resample_polyline(lane["shape_metsr"], step=step))
+        return self._dedupe_metsr_points(points)
+
+    def _shortest_path_to_lane(self, start_lane_id, target_lane_id, max_visits=20):
+        if start_lane_id == target_lane_id:
+            return [start_lane_id]
+        heap = [(0.0, start_lane_id, [start_lane_id])]
+        best_cost = {start_lane_id: 0.0}
+        visits = 0
+        target_edge = self.lanes.get(target_lane_id, {}).get("edge_id")
+        while heap and visits < max_visits:
+            cost, lane_id, path = heappop(heap)
+            visits += 1
+            if cost > best_cost.get(lane_id, float("inf")):
+                continue
+            for next_lane_id in self.lane_successors.get(lane_id, []):
+                next_lane = self.lanes.get(next_lane_id)
+                if next_lane is None:
+                    continue
+                if next_lane_id != target_lane_id and not next_lane["is_internal"] and next_lane["edge_id"] == target_edge:
+                    continue
+                next_cost = cost + max(0.1, next_lane["length"])
+                if next_cost >= best_cost.get(next_lane_id, float("inf")):
+                    continue
+                next_path = path + [next_lane_id]
+                if next_lane_id == target_lane_id:
+                    return next_path
+                best_cost[next_lane_id] = next_cost
+                heappush(heap, (next_cost, next_lane_id, next_path))
+        return []
+
     def _append_metsr_locations(self, locations, points):
         for point in points:
             self._append_location(locations, self._metsr_to_carla(point))
@@ -659,6 +802,19 @@ class CosimPathPlanner:
         clipped.extend(polyline[seg_idx + 1 :])
         return clipped
 
+    def _polyline_fraction_at_segment(self, polyline, seg_idx, seg_t):
+        total = self._polyline_length(polyline)
+        if total <= 0.0:
+            return 0.0
+        walked = 0.0
+        for idx, (a, b) in enumerate(zip(polyline[:-1], polyline[1:])):
+            segment_length = self._distance_2d(a, b)
+            if idx == seg_idx:
+                walked += max(0.0, min(1.0, seg_t)) * segment_length
+                break
+            walked += segment_length
+        return max(0.0, min(1.0, walked / total))
+
     def _resample_polyline(self, polyline, step=2.0):
         if len(polyline) < 2:
             return polyline
@@ -731,6 +887,24 @@ class CosimPathPlanner:
             if loc.distance(deduped[-1]) > eps:
                 deduped.append(loc)
         return deduped
+
+    def _dedupe_metsr_points(self, points, eps=0.3):
+        if not points:
+            return []
+        deduped = [points[0]]
+        for point in points[1:]:
+            if self._distance_2d(deduped[-1], point) > eps:
+                deduped.append(point)
+        return deduped
+
+    def _interpolate_point(self, first, second, fraction):
+        fraction = max(0.0, min(1.0, float(fraction)))
+        x = first[0] + (second[0] - first[0]) * fraction
+        y = first[1] + (second[1] - first[1]) * fraction
+        if len(first) >= 3 and len(second) >= 3:
+            z = first[2] + (second[2] - first[2]) * fraction
+            return (x, y, z)
+        return (x, y)
 
     def _polyline_length(self, points):
         total = 0.0

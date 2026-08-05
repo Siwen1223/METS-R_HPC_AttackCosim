@@ -26,12 +26,12 @@ from utils.util import prepare_sim_dirs, read_run_config, run_simulation_in_dock
 SCENARIO_PATH = ROOT_DIR / "V2V-Attack-Dataset/scenarios/on_ramp/on_off_ramp_scenario_01.yaml"
 MOVEMENT_NAME = "off_ramp"
 VEHICLE_ID = 1
-LANE_PATHS = {VEHICLE_ID: ["-17_4", "-18_6", "-9_2"]}
+LANE_PATHS = {VEHICLE_ID: ["-17_4", "-18_4", "-18_5", "-18_6", "-9_2"]}
 MAX_STEPS = 700
 WARMUP_STEPS = 0
 TARGET_SPEED_MPS = 10.0
 SCENE_CENTER_XY_CARLA = [-143.0, 239.0]
-CAMERA_HEIGHT = 220
+CAMERA_HEIGHT = 160
 OUTPUT_DIR = ROOT_DIR / "V2V-Attack-Dataset/replay_records/on_ramp/on_off_ramp_scenario_01"
 OUTPUT_NAME = "off_ramp_lane4.jsonl"
 REUSE_METSR = False

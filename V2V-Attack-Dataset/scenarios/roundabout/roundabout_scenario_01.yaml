@@ -1,0 +1,72 @@
+scenario_id: "roundabout_scenario_01"
+name: "Town03 central roundabout"
+
+town: "Town03"
+network_file: "data/CARLA/Town03/facility/road/Town03.net.xml"
+config_file: "configs/run_cosim_CARLAT3.json"
+intersection_center_xy_carla: [0, 0]
+
+roads:
+  north:
+    incoming: ["28"]
+    outgoing: ["-28"]
+  east:
+    incoming: ["-8"]
+    outgoing: ["8"]
+  south:
+    incoming: ["30"]
+    outgoing: ["-30"]
+  west:
+    incoming: ["61"]
+    outgoing: ["-61"]
+
+movements:
+  north_to_east: {origin: "28", destination: "8", maneuver: left_turn}
+  north_to_south: {origin: "28", destination: "-30", maneuver: straight}
+  north_to_west: {origin: "28", destination: "-61", maneuver: right_turn}
+
+  east_to_south: {origin: "-8", destination: "-30", maneuver: left_turn}
+  east_to_west: {origin: "-8", destination: "-61", maneuver: straight}
+  east_to_north: {origin: "-8", destination: "-28", maneuver: right_turn}
+
+  south_to_west: {origin: "30", destination: "-61", maneuver: left_turn}
+  south_to_north: {origin: "30", destination: "-28", maneuver: straight}
+  south_to_east: {origin: "30", destination: "8", maneuver: right_turn}
+
+  west_to_north: {origin: "61", destination: "-28", maneuver: left_turn}
+  west_to_east: {origin: "61", destination: "8", maneuver: straight}
+  west_to_south: {origin: "61", destination: "-30", maneuver: right_turn}
+
+cosim_roads:
+  - "-28"
+  - "28"
+  - "-8"
+  - "8"
+  - "-30"
+  - "30"
+  - "-61"
+  - "61"
+  - "-10"
+  - "46"
+  - "-11"
+  - "34"
+  - "15"
+  - "-36"
+  - "-37"
+  - "-25"
+  - "-38"
+  - "-12"
+  - "-13"
+  - "16"
+  - "-14"
+  - "-9"
+
+traffic_lights:
+  enabled: false
+
+right_of_way:
+  type: merge and diverge
+  priority: roundabout
+  yield: outside roads
+
+notes: ""

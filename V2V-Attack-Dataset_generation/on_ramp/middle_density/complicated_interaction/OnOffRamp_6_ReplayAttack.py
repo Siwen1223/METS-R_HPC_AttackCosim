@@ -27,17 +27,17 @@ DATASET_ROOT = ROOT_DIR / "V2V-Attack-Dataset"
 REPLAY_RECORD_PATH = DATASET_ROOT / "replay_records/on_ramp/on_off_ramp_scenario_01/off_ramp_lane4.jsonl"
 MOVEMENT_NAMES = ("on_ramp", "on_ramp", "mainline", "mainline", "off_ramp", "off_ramp")
 LANE_PATHS = {
-    1: ["43_2", "-18_6", "-19_5"],
-    2: ["43_2", "-18_6", "-19_5"],
+    1: ["43_2", "-18_6", "-18_5", "-19_5"],
+    2: ["43_2", "-18_6", "-18_5", "-19_5"],
     3: ["-17_4", "-18_4", "-19_4"],
     4: ["-17_5", "-18_5", "-19_5"],
-    5: ["-17_4", "-18_6", "-9_2"],
-    6: ["-17_5", "-18_6", "-9_2"],
+    5: ["-17_4", "-18_4", "-18_5", "-18_6", "-9_2"],
+    6: ["-17_5", "-18_5", "-18_6", "-9_2"],
 }
 OFF_RAMP_LANE4_VID = 5
 OFF_RAMP_POINT_CENTER_XY_CARLA = [-122.3, 233.6]
 SCENE_CENTER_XY_CARLA = [-143.0, 239.0]
-CAMERA_HEIGHT = 220
+CAMERA_HEIGHT = 160
 RANDOM_SEED = 42
 TRAFFIC_DENSITY = "middle_density"
 INTERACTION_COMPLEXITY = "complicated_interaction"
