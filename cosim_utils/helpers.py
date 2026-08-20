@@ -66,3 +66,13 @@ def scenario_trip_specs(scenario, movement_names):
             raise ValueError(f"Scenario movement {movement_name} is missing {exc.args[0]}") from exc
         trips.append((vid, origin, destination, movement_name))
     return trips
+
+
+def scenario_lane_paths_for_trips(scenario, trip_specs):
+    lane_paths_by_movement = scenario.get("lane_paths") or {}
+    lane_paths_by_vehicle = {}
+    for vid, _origin, _destination, movement_name in trip_specs:
+        lane_path = lane_paths_by_movement.get(movement_name)
+        if lane_path:
+            lane_paths_by_vehicle[vid] = list(lane_path)
+    return lane_paths_by_vehicle

@@ -52,7 +52,9 @@ class LocalPlanner:
             max_throttle: maximum throttle applied to the vehicle
             max_brake: maximum brake applied to the vehicle
             max_steering: maximum steering applied to the vehicle
+            max_steering_delta: maximum steering change allowed in one control step
             offset: distance between the route waypoints and the center of the lane
+            target_lookahead_distance: distance ahead in the queued route used as the lateral-control target
             waypoint_behind_threshold: forward projection threshold below which a waypoint is treated as passed
             waypoint_behind_max_prune_distance: max distance for removing a waypoint only because it is behind
         :param map_inst: carla.Map instance to avoid the expensive call of getting it.
@@ -85,9 +87,11 @@ class LocalPlanner:
         self._max_throt = 0.75
         self._max_brake = 0.3
         self._max_steer = 0.8
+        self._max_steer_delta = 0.1
         self._offset = 0
         self._base_min_distance = 3.0
         self._distance_ratio = 0.5
+        self._target_lookahead_distance = 0.0
         self._waypoint_behind_threshold = 0.5
         self._waypoint_behind_max_prune_distance = 8.0
         self._follow_speed_limits = False
@@ -110,12 +114,16 @@ class LocalPlanner:
                 self._max_brake = opt_dict['max_brake']
             if 'max_steering' in opt_dict:
                 self._max_steer = opt_dict['max_steering']
+            if 'max_steering_delta' in opt_dict:
+                self._max_steer_delta = opt_dict['max_steering_delta']
             if 'offset' in opt_dict:
                 self._offset = opt_dict['offset']
             if 'base_min_distance' in opt_dict:
                 self._base_min_distance = opt_dict['base_min_distance']
             if 'distance_ratio' in opt_dict:
                 self._distance_ratio = opt_dict['distance_ratio']
+            if 'target_lookahead_distance' in opt_dict:
+                self._target_lookahead_distance = opt_dict['target_lookahead_distance']
             if 'waypoint_behind_threshold' in opt_dict:
                 self._waypoint_behind_threshold = opt_dict['waypoint_behind_threshold']
             if 'waypoint_behind_max_prune_distance' in opt_dict:
@@ -142,7 +150,8 @@ class LocalPlanner:
                                                         offset=self._offset,
                                                         max_throttle=self._max_throt,
                                                         max_brake=self._max_brake,
-                                                        max_steering=self._max_steer)
+                                                        max_steering=self._max_steer,
+                                                        max_steering_delta=self._max_steer_delta)
 
         # Compute the current vehicle waypoint
         current_waypoint = self._map.get_waypoint(self._vehicle.get_location())
@@ -293,13 +302,30 @@ class LocalPlanner:
             control.hand_brake = False
             control.manual_gear_shift = False
         else:
-            self.target_waypoint, self.target_road_option = self._waypoints_queue[0]
+            self.target_waypoint, self.target_road_option = self._select_target_waypoint(veh_location)
             control = self._vehicle_controller.run_step(self._target_speed, self.target_waypoint)
 
         if debug:
             draw_waypoints(self._vehicle.get_world(), [self.target_waypoint], 1.0)
 
         return control
+
+    def _select_target_waypoint(self, veh_location):
+        if self._target_lookahead_distance <= 0.0 or len(self._waypoints_queue) <= 1:
+            return self._waypoints_queue[0]
+
+        lookahead = max(self._min_distance, float(self._target_lookahead_distance))
+        previous_location = veh_location
+        accumulated_distance = 0.0
+        selected = self._waypoints_queue[0]
+        for waypoint, road_option in self._waypoints_queue:
+            waypoint_location = waypoint.transform.location
+            accumulated_distance += previous_location.distance(waypoint_location)
+            selected = (waypoint, road_option)
+            if accumulated_distance >= lookahead:
+                break
+            previous_location = waypoint_location
+        return selected
 
     def get_incoming_waypoint_and_direction(self, steps=3):
         """

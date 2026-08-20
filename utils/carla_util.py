@@ -1,10 +1,19 @@
 import math
 import os
 import platform
+import subprocess
 import time
 from dataclasses import dataclass, field
 
 import carla
+
+
+def _cleanup_stale_carla_processes():
+      if platform.system() == "Windows":
+            return
+      for pattern in ("CarlaUE4-Linux-Shipping", "CarlaUE4s"):
+            subprocess.run(["pkill", "-f", pattern], check=False)
+      time.sleep(2)
 
 
 def open_carla(config):
@@ -12,7 +21,10 @@ def open_carla(config):
             client = carla.Client(config.carla_host, config.carla_port)
             client.set_timeout(20.0)
             world = client.load_world(config.carla_map)
+            print(f"Reusing CARLA server on {config.carla_host}:{config.carla_port}")
       except Exception:
+            print("Existing CARLA server is unavailable; cleaning stale CARLA processes before starting a new server.")
+            _cleanup_stale_carla_processes()
             if platform.system() == "Windows":
                   os.system(f"start {config.carla_dir} -carla-server -carla-rpc-port={config.carla_port} -windowed -ResX=800 -ResY=600")
             else:

@@ -21,7 +21,7 @@ class VehiclePIDController:
 
 
     def __init__(self, vehicle, args_lateral, args_longitudinal, offset=0, max_throttle=0.75, max_brake=0.3,
-                 max_steering=0.8):
+                 max_steering=0.8, max_steering_delta=0.1):
         """
         Constructor method.
 
@@ -44,6 +44,7 @@ class VehiclePIDController:
         self.max_brake = max_brake
         self.max_throt = max_throttle
         self.max_steer = max_steering
+        self.max_steer_delta = max_steering_delta
 
         self._vehicle = vehicle
         self._world = self._vehicle.get_world()
@@ -74,10 +75,10 @@ class VehiclePIDController:
 
         # Steering regulation: changes cannot happen abruptly, can't steer too much.
 
-        if current_steering > self.past_steering + 0.1:
-            current_steering = self.past_steering + 0.1
-        elif current_steering < self.past_steering - 0.1:
-            current_steering = self.past_steering - 0.1
+        if current_steering > self.past_steering + self.max_steer_delta:
+            current_steering = self.past_steering + self.max_steer_delta
+        elif current_steering < self.past_steering - self.max_steer_delta:
+            current_steering = self.past_steering - self.max_steer_delta
 
         if current_steering >= 0:
             steering = min(self.max_steer, current_steering)

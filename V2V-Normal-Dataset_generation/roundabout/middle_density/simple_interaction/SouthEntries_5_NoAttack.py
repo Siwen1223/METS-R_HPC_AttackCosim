@@ -13,8 +13,13 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from clients.V2V_CoSimClient_master import V2VCoSimClientMaster
-from cosim_utils.dataset_saver import DatasetSaver
-from cosim_utils.helpers import is_port_open, load_scenario, scenario_trip_specs, set_random_seed
+from cosim_utils.helpers import (
+    is_port_open,
+    load_scenario,
+    scenario_lane_paths_for_trips,
+    scenario_trip_specs,
+    set_random_seed,
+)
 from utils.carla_util import open_carla
 from utils.simu5g_v2x_util import start_simu5g_bridge_in_terminal
 from utils.util import prepare_sim_dirs, read_run_config, run_simulation_in_docker
@@ -29,28 +34,57 @@ RANDOM_SEED = 42
 TRAFFIC_DENSITY = "middle_density"
 INTERACTION_COMPLEXITY = "simple_interaction"
 WEATHER = "clear"
-MAX_STEPS = 500
+MAX_STEPS = 900
 WARMUP_STEPS = 0
 SAME_ROUTE_DEPARTURE_GAP_TICKS = 20
+SAME_ROUTE_SPAWN_CLEARANCE_M = 18.0
+SAVE_DATASET = True
+
+
+class NoOpDatasetSaver:
+    def log_event(self, sim_time, message):
+        return None
+
+    def record_step(self, *args, **kwargs):
+        return None
+
+    def finalize(self, *args, **kwargs):
+        return None
 
 
 def no_attack_metadata():
     return {"attack_type": "no_attack"}
 
 
-def configure_run(scenario):
+def configure_run(scenario, lane_paths):
     config = read_run_config(scenario["config_file"])
     set_random_seed(RANDOM_SEED, config=config)
     config.verbose = False
     config.display_all = False
     config.enable_debug_draw = False
     config.draw_route_plan = False
+    config.enable_trajectory_binary_write = True
+    config.json_output = True
     config.v2v_position_mode = "local"
+    config.v2v_target_speed_mps = 8.0
     config.cv2x_communication_range_m = 500.0
     config.carla_tick_timeout = 5.0
     config.metsr_tick_timeout = 5.0
     config.release_queued_cosim_vehicles = True
     config.handoff_spawn_clearance_m = 10.0
+    config.controller_lane_paths = lane_paths
+    config.controller_kwargs = {
+        "route_project_to_carla_map": False,
+        "curve_speed_cap_mps": 4.5,
+        "junction_curve_speed_cap_mps": 4.0,
+        "sharp_right_curve_speed_cap_mps": 4.0,
+        "local_planner_target_lookahead_distance": 5.0,
+        "local_planner_base_min_distance": 1.8,
+        "local_planner_distance_ratio": 0.25,
+        "lateral_control_dict": {"K_P": 1.15, "K_I": 0.0, "K_D": 0.08},
+        "max_steering": 0.65,
+        "max_steering_delta": 0.06,
+    }
     config.camera_layout = "front_rear"
     config.camera_interval_ticks = 5
     config.lidar_interval_ticks = 10
@@ -81,26 +115,53 @@ def run_one_step(cosim_client, data_saver, controller_vids, run_start_tick, dt, 
     state["duration_sec"] = sim_time
     time.sleep(0.08)
 
-
 def generate_trips_with_gaps(cosim_client, trip_specs, data_saver, controller_vids, run_start_tick, dt, state):
     last_generated_tick_by_origin = {}
+    generated_vids_by_origin = {}
     for vid, road_from, road_to, movement_name in trip_specs:
-        origin = road_from
         while (
-            origin in last_generated_tick_by_origin
-            and cosim_client.current_tick - last_generated_tick_by_origin[origin] < SAME_ROUTE_DEPARTURE_GAP_TICKS
+            not _origin_ready_for_next_departure(
+                cosim_client,
+                road_from,
+                last_generated_tick_by_origin,
+                generated_vids_by_origin,
+            )
         ):
             run_one_step(cosim_client, data_saver, controller_vids, run_start_tick, dt, state)
-        print(f"Generating trip veh={vid} movement={movement_name}: {road_from} -> {road_to}")
         cosim_client.metsr.generate_trip_between_roads([vid], road_from, road_to)
         cosim_client.metsr.update_vehicle_sensor_type([vid], "cv2x", True)
-        last_generated_tick_by_origin[origin] = cosim_client.current_tick
+        last_generated_tick_by_origin[road_from] = cosim_client.current_tick
+        generated_vids_by_origin.setdefault(road_from, []).append(vid)
+
+
+def _origin_ready_for_next_departure(cosim_client, road_from, last_generated_tick_by_origin, generated_vids_by_origin):
+    last_tick = last_generated_tick_by_origin.get(road_from)
+    if last_tick is not None and cosim_client.current_tick - last_tick < SAME_ROUTE_DEPARTURE_GAP_TICKS:
+        return False
+
+    for previous_vid in generated_vids_by_origin.get(road_from, []):
+        if not cosim_client.carla_entered.get(previous_vid, False):
+            return False
+
+        previous_vehicle = cosim_client.carla_vehs.get(previous_vid)
+        if previous_vehicle is None:
+            continue
+
+        spawn_loc = cosim_client.carla_handoff_locs.get(previous_vid)
+        if spawn_loc is None:
+            continue
+
+        if previous_vehicle.get_location().distance(spawn_loc) < SAME_ROUTE_SPAWN_CLEARANCE_M:
+            return False
+
+    return True
 
 
 def main():
     scenario = load_scenario(SCENARIO_PATH)
-    config = configure_run(scenario)
     trip_specs = scenario_trip_specs(scenario, MOVEMENT_NAMES)
+    lane_paths = scenario_lane_paths_for_trips(scenario, trip_specs)
+    config = configure_run(scenario, lane_paths)
     controller_vids = [vid for vid, _, _, _ in trip_specs]
     vehicle_route = {str(vid): movement_name for vid, _, _, movement_name in trip_specs}
     config.controller_vids = controller_vids
@@ -140,24 +201,29 @@ def main():
 
         run_start_tick = cosim_client.current_tick
         dt = float(getattr(config, "sim_step_size", 0.1))
-        data_saver = DatasetSaver(
-            DATASET_ROOT,
-            {
-                "map": getattr(config, "carla_map", scenario.get("town", "")),
-                "scenario": str(SCENARIO_PATH),
-                "scenario_variant": CASE_NAME,
-                "interaction_complexity": INTERACTION_COMPLEXITY,
-                "traffic_density": TRAFFIC_DENSITY,
-                "vehicle_route": vehicle_route,
-                "weather": WEATHER,
-                "random_seed": RANDOM_SEED,
-                "sim_step_size": dt,
-                "sim_fps": 1.0 / dt,
-                "max_steps": MAX_STEPS,
-                "planned_duration_sec": MAX_STEPS * dt,
-            },
-            no_attack_metadata(),
-        )
+        if SAVE_DATASET:
+            from cosim_utils.dataset_saver import DatasetSaver
+
+            data_saver = DatasetSaver(
+                DATASET_ROOT,
+                {
+                    "map": getattr(config, "carla_map", scenario.get("town", "")),
+                    "scenario": str(SCENARIO_PATH),
+                    "scenario_variant": CASE_NAME,
+                    "interaction_complexity": INTERACTION_COMPLEXITY,
+                    "traffic_density": TRAFFIC_DENSITY,
+                    "vehicle_route": vehicle_route,
+                    "weather": WEATHER,
+                    "random_seed": RANDOM_SEED,
+                    "sim_step_size": dt,
+                    "sim_fps": 1.0 / dt,
+                    "max_steps": MAX_STEPS,
+                    "planned_duration_sec": MAX_STEPS * dt,
+                },
+                no_attack_metadata(),
+            )
+        else:
+            data_saver = NoOpDatasetSaver()
         data_saver.log_event(0.0, f"run initialized: {CASE_NAME}")
         camera_x, camera_y = scenario.get("intersection_center_xy_carla", [0, 0])
         cosim_client.set_custom_camera(camera_x, camera_y, CAMERA_HEIGHT)

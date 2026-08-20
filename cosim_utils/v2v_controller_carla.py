@@ -55,6 +55,11 @@ class V2VControllerCarla:
         local_planner_sampling_radius=1.0,
         local_planner_base_min_distance=1.5,
         local_planner_distance_ratio=0.2,
+        local_planner_target_lookahead_distance=0.0,
+        lateral_control_dict=None,
+        longitudinal_control_dict=None,
+        max_steering=0.8,
+        max_steering_delta=0.1,
         waypoint_behind_threshold=0.5,
         waypoint_behind_max_prune_distance=8.0,
         control_dt=0.1,
@@ -111,6 +116,11 @@ class V2VControllerCarla:
         self.local_planner_sampling_radius = local_planner_sampling_radius
         self.local_planner_base_min_distance = local_planner_base_min_distance
         self.local_planner_distance_ratio = local_planner_distance_ratio
+        self.local_planner_target_lookahead_distance = local_planner_target_lookahead_distance
+        self.lateral_control_dict = dict(lateral_control_dict or {})
+        self.longitudinal_control_dict = dict(longitudinal_control_dict or {})
+        self.max_steering = max_steering
+        self.max_steering_delta = max_steering_delta
         self.waypoint_behind_threshold = waypoint_behind_threshold
         self.waypoint_behind_max_prune_distance = waypoint_behind_max_prune_distance
         self.control_dt = control_dt
@@ -140,9 +150,16 @@ class V2VControllerCarla:
             "sampling_radius": self.local_planner_sampling_radius,
             "base_min_distance": self.local_planner_base_min_distance,
             "distance_ratio": self.local_planner_distance_ratio,
+            "target_lookahead_distance": self.local_planner_target_lookahead_distance,
+            "max_steering": self.max_steering,
+            "max_steering_delta": self.max_steering_delta,
             "waypoint_behind_threshold": self.waypoint_behind_threshold,
             "waypoint_behind_max_prune_distance": self.waypoint_behind_max_prune_distance,
         }
+        if self.lateral_control_dict:
+            opt_dict["lateral_control_dict"] = self.lateral_control_dict
+        if self.longitudinal_control_dict:
+            opt_dict["longitudinal_control_dict"] = self.longitudinal_control_dict
         self.agent = BasicAgent(self.vehicle, target_speed=self._to_kmh(target_speed_mps), opt_dict=opt_dict, map_inst=self.map)
         local_planner = self.agent.get_local_planner()
         vehicle_controller = getattr(local_planner, "_vehicle_controller", None)

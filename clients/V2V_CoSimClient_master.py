@@ -187,7 +187,8 @@ class V2VCoSimClientMaster(CoSimClient):
         managed_ids = set(self.carla_vehs.keys())
 
         for vid in managed_ids - current_cosim_ids:
-            print(f"Vehicle {vid} left the co-sim ownership set and is no longer CARLA-managed.")
+            if getattr(self.config, "verbose", False):
+                print(f"Vehicle {vid} left the co-sim ownership set and is no longer CARLA-managed.")
             self.handoff_carla_vehicle(vid)
 
         for cosim_id in cosim_ids:
@@ -195,7 +196,8 @@ class V2VCoSimClientMaster(CoSimClient):
             self.carla_private_flags[cosim_id] = private_flag
             if cosim_id not in self.carla_vehs and veh_info["state"] > 0:
                 if cosim_id in self.displayOnly_vehs:
-                    print(f"Vehicle {cosim_id} switched from display-only to CARLA-managed.")
+                    if getattr(self.config, "verbose", False):
+                        print(f"Vehicle {cosim_id} switched from display-only to CARLA-managed.")
                     self.destroy_carla_vehicle(cosim_id)
                 self.carla_coordMaps[cosim_id] = cosim_meta_map[cosim_id].get("coord_map", [])
                 self.carla_route[cosim_id] = self._route_ids_from_preferred_lanes(
@@ -219,7 +221,7 @@ class V2VCoSimClientMaster(CoSimClient):
                 self.carla_handoff_yaws[cosim_id] = handoff_yaw
                 blocking_vid = self._handoff_spawn_blocker(cosim_id, handoff_loc)
                 if blocking_vid is not None:
-                    if cosim_id not in self.carla_spawn_pending:
+                    if cosim_id not in self.carla_spawn_pending and getattr(self.config, "verbose", False):
                         print(
                             f"Vehicle {cosim_id} handoff delayed because vehicle {blocking_vid} "
                             f"is still within {self.handoff_spawn_clearance_m:.1f} m of "
@@ -229,7 +231,7 @@ class V2VCoSimClientMaster(CoSimClient):
                     continue
                 spawned_actor = self.spawn_carla_vehicle(cosim_id, private_flag, veh_info, display_only=False)
                 if spawned_actor is None:
-                    if cosim_id not in self.carla_spawn_pending:
+                    if cosim_id not in self.carla_spawn_pending and getattr(self.config, "verbose", False):
                         handoff_loc = self.carla_handoff_locs[cosim_id]
                         print(
                             f"Vehicle {cosim_id} handoff delayed because CARLA could not spawn it "
@@ -239,7 +241,8 @@ class V2VCoSimClientMaster(CoSimClient):
                     continue
                 self.carla_spawn_pending.discard(cosim_id)
                 self.carla_entered[cosim_id] = True
-                print(f"Vehicle {cosim_id} entered the co-sim ownership set and is now CARLA-managed.")
+                if getattr(self.config, "verbose", False):
+                    print(f"Vehicle {cosim_id} entered the co-sim ownership set and is now CARLA-managed.")
 
         for cosim_id in cosim_ids:
             if cosim_id in self.carla_vehs:
@@ -286,10 +289,14 @@ class V2VCoSimClientMaster(CoSimClient):
             return list(fallback_route or [])
 
         fallback = [str(route_id) for route_id in (fallback_route or [])]
-        if fallback and route_ids[0] != fallback[0]:
-            return fallback
-        if fallback and fallback[-1] not in route_ids:
-            return fallback
+        if fallback:
+            if fallback[-1] not in route_ids:
+                return fallback
+            if route_ids[0] != fallback[0]:
+                try:
+                    return route_ids[route_ids.index(fallback[0]) :]
+                except ValueError:
+                    return fallback
         return route_ids
 
     def _vehicle_for_sensor(self, vid):

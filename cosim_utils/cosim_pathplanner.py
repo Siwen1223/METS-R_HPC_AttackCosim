@@ -163,7 +163,7 @@ class CosimPathPlanner:
         for lane_id in preferred_lane_ids:
             lane_id = str(lane_id)
             lane = self.lanes.get(lane_id)
-            if lane is None or not lane["is_driving"]:
+            if lane is None or not lane.get("is_route_lane", lane["is_driving"]):
                 continue
             if lane["edge_id"] in route_set:
                 return lane_id
@@ -183,7 +183,7 @@ class CosimPathPlanner:
         for raw_lane_id in preferred_lane_ids:
             lane_id = str(raw_lane_id)
             lane = self.lanes.get(lane_id)
-            if lane is None or lane["is_internal"] or not lane["is_driving"]:
+            if lane is None or lane["is_internal"] or not lane.get("is_route_lane", lane["is_driving"]):
                 continue
             edge_id = lane["edge_id"]
             if edge_id not in route_index:
@@ -326,6 +326,7 @@ class CosimPathPlanner:
                 else:
                     lane_role = type_tokens[lane_index] if lane_index < len(type_tokens) else None
                     is_driving = lane_role == "driving"
+                is_route_lane = is_driving or lane_role in {"shoulder", "border"}
                 shape_sumo = self._shape_points_from_attr(lane.get("shape") or edge.get("shape"))
                 shape_metsr = [self._sumo_to_metsr(point, net_offset) for point in shape_sumo]
                 lane_data = {
@@ -334,6 +335,7 @@ class CosimPathPlanner:
                     "index": lane_index,
                     "role": lane_role,
                     "is_driving": is_driving,
+                    "is_route_lane": is_route_lane,
                     "is_internal": edge_function == "internal" or edge_id.startswith(":"),
                     "shape_metsr": shape_metsr,
                     "length": self._polyline_length(shape_metsr),
@@ -367,7 +369,9 @@ class CosimPathPlanner:
     def _add_lane_arc(self, successors, predecessors, lanes, from_lane_id, to_lane_id):
         if from_lane_id not in lanes or to_lane_id not in lanes:
             return
-        if not lanes[from_lane_id]["is_driving"] or not lanes[to_lane_id]["is_driving"]:
+        if not lanes[from_lane_id].get("is_route_lane", lanes[from_lane_id]["is_driving"]):
+            return
+        if not lanes[to_lane_id].get("is_route_lane", lanes[to_lane_id]["is_driving"]):
             return
         if to_lane_id not in successors[from_lane_id]:
             successors[from_lane_id].append(to_lane_id)
@@ -519,6 +523,8 @@ class CosimPathPlanner:
                 continue
             for next_lane_id in self.lane_successors.get(lane_id, []):
                 next_lane = self.lanes[next_lane_id]
+                if not next_lane.get("is_route_lane", next_lane["is_driving"]):
+                    continue
                 next_edge = next_lane["edge_id"]
                 if not next_lane["is_internal"] and allowed_edges is not None and next_edge not in allowed_edges:
                     continue
@@ -619,12 +625,18 @@ class CosimPathPlanner:
             return []
 
         base_shape = lane_shapes[0]
+        base_length = max(self._polyline_length(base_shape), 1e-6)
+        if base_length < 8.0:
+            start_point = base_shape[0]
+            if start_point_metsr is not None:
+                _, start_point, _, _ = self._distance_to_polyline(start_point_metsr, base_shape)
+            return self._resample_polyline([start_point, lane_shapes[-1][-1]], step=step)
+
         start_fraction = 0.0
         if start_point_metsr is not None:
             _, _, seg_idx, seg_t = self._distance_to_polyline(start_point_metsr, base_shape)
             start_fraction = self._polyline_fraction_at_segment(base_shape, seg_idx, seg_t)
 
-        base_length = max(self._polyline_length(base_shape), 1e-6)
         fraction_step = max(0.01, float(step) / base_length)
         fractions = []
         value = start_fraction
@@ -684,18 +696,25 @@ class CosimPathPlanner:
             visits += 1
             if cost > best_cost.get(lane_id, float("inf")):
                 continue
+            if lane_id == target_lane_id:
+                return path
             for next_lane_id in self.lane_successors.get(lane_id, []):
                 next_lane = self.lanes.get(next_lane_id)
                 if next_lane is None:
                     continue
+                if not next_lane.get("is_route_lane", next_lane["is_driving"]):
+                    continue
                 if next_lane_id != target_lane_id and not next_lane["is_internal"] and next_lane["edge_id"] == target_edge:
                     continue
-                next_cost = cost + max(0.1, next_lane["length"])
+                current_shape = self.lanes.get(lane_id, {}).get("shape_metsr") or []
+                next_shape = next_lane.get("shape_metsr") or []
+                transition_gap = 0.0
+                if current_shape and next_shape:
+                    transition_gap = self._distance_2d(current_shape[-1], next_shape[0])
+                next_cost = cost + max(0.1, next_lane["length"]) + 2.0 * transition_gap
                 if next_cost >= best_cost.get(next_lane_id, float("inf")):
                     continue
                 next_path = path + [next_lane_id]
-                if next_lane_id == target_lane_id:
-                    return next_path
                 best_cost[next_lane_id] = next_cost
                 heappush(heap, (next_cost, next_lane_id, next_path))
         return []

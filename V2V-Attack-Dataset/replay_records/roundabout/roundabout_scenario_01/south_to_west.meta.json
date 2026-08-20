@@ -1,0 +1,16 @@
+{
+  "record_type": "roundabout_replay_bsm_trajectory",
+  "scenario_id": "roundabout_scenario_01",
+  "scenario_path": "/home/siwen/Software/METS-R_docker/METS-R_HPC/V2V-Attack-Dataset/scenarios/roundabout/roundabout_scenario_01.yaml",
+  "movement": "south_to_west",
+  "maneuver": "left_turn",
+  "origin": "30",
+  "destination": "-61",
+  "vehicle_id": 1,
+  "target_speed_mps": 8.0,
+  "sim_step_size": 0.1,
+  "record_count": 510,
+  "first_source_tick": 1,
+  "last_source_tick": 510,
+  "output": "/home/siwen/Software/METS-R_docker/METS-R_HPC/V2V-Attack-Dataset/replay_records/roundabout/roundabout_scenario_01/south_to_west.jsonl"
+}
